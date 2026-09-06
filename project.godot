@@ -27,7 +27,6 @@ PlayerState="*res://scripts/PlayerState.cs"
 
 window/size/viewport_width=1500
 window/size/viewport_height=1150
-window/size/mode=2
 
 [dotnet]
 
