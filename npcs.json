@@ -1,0 +1,29 @@
+[
+  {
+    "id": "npc_0",
+    "name": "Maren",
+    "backstory": "A blacksmith's apprentice who comes to this garden looking for a quiet place to think.",
+    "archetype": "steady_thinker",
+    "start_x": 210,
+    "start_y": 200,
+    "color": "#2650D9"
+  },
+  {
+    "id": "npc_1",
+    "name": "Finn",
+    "backstory": "Grew up on a fishing boat and feels most himself with his feet in the water, though he's never turned down a good apple either.",
+    "archetype": "easygoing_wanderer",
+    "start_x": 250,
+    "start_y": 270,
+    "color": "#D9731A"
+  },
+  {
+    "id": "npc_2",
+    "name": "Wren",
+    "backstory": "Has never stayed anywhere long. Every hazy shape on the horizon is an open question, and Wren has never been good at leaving those alone.",
+    "archetype": "wanderer_at_heart",
+    "start_x": 170,
+    "start_y": 260,
+    "color": "#4CBF59"
+  }
+]

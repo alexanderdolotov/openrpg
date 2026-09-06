@@ -1,0 +1,16 @@
+# secrets — never commit a real config, only mind.example.json
+mind.local.json
+
+# opt-in debug output
+logs/
+
+# Godot
+.godot/
+*.translation
+export_presets.cfg
+
+# .NET / C#
+.mono/
+bin/
+obj/
+*.csproj.user

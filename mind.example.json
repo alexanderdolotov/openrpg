@@ -1,0 +1,8 @@
+{
+  "provider": "ollama",
+  "base_url": "http://analytics.local:11434",
+  "model": "llama3.2:3b",
+  "api_key": "",
+  "log_npc_thoughts": false,
+  "pure_llm_mode": false
+}

@@ -1,0 +1,11 @@
+[
+  { "id": "steady_thinker", "description": "Grounded, a little guarded, thinks before acting.", "openness": 0.6, "conscientiousness": 0.7, "extraversion": 0.3, "agreeableness": 0.5, "neuroticism": 0.4 },
+  { "id": "easygoing_wanderer", "description": "Curious, sociable, doesn't stress much.", "openness": 0.7, "conscientiousness": 0.4, "extraversion": 0.6, "agreeableness": 0.6, "neuroticism": 0.3 },
+  { "id": "cautious_homebody", "description": "Prefers routine and the familiar; slow to warm up.", "openness": 0.3, "conscientiousness": 0.8, "extraversion": 0.2, "agreeableness": 0.5, "neuroticism": 0.6 },
+  { "id": "bold_adventurer", "description": "Chases novelty, impatient with caution.", "openness": 0.9, "conscientiousness": 0.4, "extraversion": 0.7, "agreeableness": 0.4, "neuroticism": 0.3 },
+  { "id": "gruff_loner", "description": "Keeps to themselves, blunt, hard to read.", "openness": 0.4, "conscientiousness": 0.6, "extraversion": 0.1, "agreeableness": 0.2, "neuroticism": 0.5 },
+  { "id": "warm_socializer", "description": "Thrives around others, quick to trust.", "openness": 0.6, "conscientiousness": 0.5, "extraversion": 0.9, "agreeableness": 0.8, "neuroticism": 0.3 },
+  { "id": "anxious_worrier", "description": "Careful to a fault, easily rattled.", "openness": 0.4, "conscientiousness": 0.7, "extraversion": 0.3, "agreeableness": 0.6, "neuroticism": 0.85 },
+  { "id": "calm_pragmatist", "description": "Even-keeled, focused on what works.", "openness": 0.5, "conscientiousness": 0.8, "extraversion": 0.4, "agreeableness": 0.5, "neuroticism": 0.15 },
+  { "id": "wanderer_at_heart", "description": "Can't sit still; always eyeing the horizon, unbothered by not knowing what's out there.", "openness": 0.9, "conscientiousness": 0.25, "extraversion": 0.55, "agreeableness": 0.5, "neuroticism": 0.2 }
+]
