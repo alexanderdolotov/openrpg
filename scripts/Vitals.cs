@@ -13,6 +13,10 @@ public class Vitals
     public float Fatigue = 100f; // 100 = fully rested, 0 = running on empty
 
     public const float LowFatigueThreshold = 25f; // below this, perception explicitly says so — the LLM decides what to do about it, nothing forces sleep
+    // Above this, sleep isn't offered as an option at all (NPCActor.
+    // CanSleep()) — not tired enough for it to make sense regardless of
+    // location.
+    public const float SleepUnnecessaryThreshold = 70f;
     public const float PassiveDecayPerSecond = 100f / 900f; // ~15 real minutes from full to empty doing nothing but standing around
 
     public bool NeedsSleep => Fatigue < LowFatigueThreshold;

@@ -26,6 +26,22 @@ public static class EmotionExtensions
 
     public static string ToWireString(this Emotion emotion) => emotion.ToString().ToLowerInvariant();
 
+    // Purely cosmetic — shown above a character's head (see
+    // NPCActor.UpdateEmotionEmoji()). Never fed back into the LLM or
+    // any decision; ToWireString() above is still the only
+    // machine-facing representation.
+    public static string ToEmoji(this Emotion emotion) => emotion switch
+    {
+        Emotion.Happy => "😊",
+        Emotion.Sad => "😢",
+        Emotion.Excited => "🤩",
+        Emotion.Fearful => "😨",
+        Emotion.Angry => "😠",
+        Emotion.Curious => "🤔",
+        Emotion.Content => "😌",
+        _ => "😐", // Neutral
+    };
+
     public static Emotion Parse(string value, Emotion fallback = Emotion.Neutral)
     {
         if (!string.IsNullOrEmpty(value) && System.Enum.TryParse(value, true, out Emotion parsed))

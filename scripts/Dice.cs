@@ -17,4 +17,11 @@ public static class Dice
     // Classic D&D ability score generation: three six-sided dice, summed
     // — a bell curve centered on 10-11, range 3-18.
     public static int ThreeD6() => Roll(6) + Roll(6) + Roll(6);
+
+    // A random float in [min, max) — for continuous-value rolls
+    // (placement jitter, and the like) that don't fit the discrete
+    // Roll(sides) shape above. Same shared Rng, so it's still one RNG
+    // source for the whole game, not a second Random risking the
+    // clock-seed collision this class exists to avoid.
+    public static float FloatRange(float min, float max) => min + (float)Rng.NextDouble() * (max - min);
 }

@@ -11,9 +11,14 @@ anyway for provenance:
   per character). See `CharacterSpriteBuilder.cs`.
 - **World tiles** (`world/*.png`) — cropped from
   [Roguelike/RPG Pack](https://kenney.nl/assets/roguelike-rpg-pack)'s
-  `Spritesheet/roguelikeSheet_transparent.png`, 16×16 each: an apple
-  tree (fruited and bare — maps directly to `AppleTree.AppleCount > 0`),
-  water, grass, dirt.
+  `Spritesheet/roguelikeSheet_transparent.png`, 16×16 each unless noted:
+  an apple tree (fruited and bare — maps directly to
+  `AppleTree.AppleCount > 0`), water, grass, dirt, an oak tree (16×32,
+  round canopy, standalone), a pine tree (16×32, conical canopy, yields
+  pinecones), a bare/dead tree (16×48, standalone), a plain bush, and a
+  bush with berry dots (reused/tinted per-type — see `Bush.cs` — for
+  blueberry/blackberry/raspberry, since the source sheet only has one
+  berry-dot color, not three distinct ones).
 
 Both packs' original zips (with every tile, not just what's used here)
 aren't checked in — only the specific crops actually referenced by code

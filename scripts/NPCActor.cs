@@ -19,7 +19,13 @@ public partial class NPCActor : CharacterBody2D
     // free-movement input handling on top of the same state machine,
     // and needs to know when it's safe to take the wheel (Idle) versus
     // when an assigned action is already navigating/resolving.
-    protected enum State { Idle, Navigating, Attempting }
+    // Sleeping is its own state, not just a fast path through Attempting
+    // — it needs to actually occupy real time (SleepDuration) rather
+    // than resolve instantly, and PlayerCharacter's free-movement branch
+    // only runs when _state == Idle, so giving sleep a distinct non-Idle
+    // state is what makes a sleeping player immobile for free, with no
+    // separate "don't let WASD move you right now" check needed.
+    protected enum State { Idle, Navigating, Attempting, Sleeping }
     protected State _state = State.Idle;
 
     public GameAction CurrentAction;
@@ -42,11 +48,25 @@ public partial class NPCActor : CharacterBody2D
     // directly). Shared by PlayerCharacter the same way Stats is.
     public readonly Vitals Vitals = new();
 
-    // Auto-property, not a plain field — PlayerCharacter implements
-    // IWorldCharacter, which requires CurrentEmotion as a property; a
-    // bare field can't satisfy that. Behaves identically to a field for
-    // every existing direct get/set call site.
-    public Emotion CurrentEmotion { get; set; } = Emotion.Neutral;
+    // A real property with a backing field, not an auto-property — the
+    // setter also flashes an emoji above this character's head, but only
+    // on an actual CHANGE of mood, not every reassignment (NpcAgent sets
+    // this every single turn, same value or not) — every existing call
+    // site that already does `actor.CurrentEmotion = ...` gets the
+    // visual for free, with no separate "and now update the display"
+    // step anyone has to remember.
+    private Emotion _currentEmotion = Emotion.Neutral;
+    public Emotion CurrentEmotion
+    {
+        get => _currentEmotion;
+        set
+        {
+            bool changed = value != _currentEmotion;
+            _currentEmotion = value;
+            if (changed)
+                FlashEmotionEmoji();
+        }
+    }
 
     // Visual scale for the 16×16 character sprite — 2.75x lands it at
     // 44×44, the same footprint the old ColorRect placeholder used, so
@@ -55,8 +75,40 @@ public partial class NPCActor : CharacterBody2D
     private const float SpriteScale = 2.75f;
     private AnimatedSprite2D _sprite;
 
+    // Above-the-head UI — world-space children (not CanvasLayer), so
+    // they move and zoom with the character exactly like the sprite
+    // does, no per-frame screen-position projection needed. The emoji
+    // sits just above the sprite; the speech bubble sits above that so
+    // the two never overlap when both are showing. Positions are tuned
+    // against the sprite's feet-anchored top edge (SpriteTopY below),
+    // not the old center-anchored one — the sprite got ~22px taller
+    // above the origin when it moved to standing on its own feet
+    // (matching AppleTree's fix for the same "Y-sort should compare
+    // ground-contact points, not centers" reasoning), so anything meant
+    // to sit "just above the head" had to move up by the same amount or
+    // it'd end up nearly touching the top of the head instead.
+    private const float SpriteTopY = -SpriteScale * CharacterSpriteBuilder.FrameSize;
+    private Label _emotionLabel;
+    private ulong _emotionToken; // same late-timer guard as _speechToken, see FlashEmotionEmoji()
+    private PanelContainer _speechBubble;
+    private ulong _speechToken; // guards against a late timer hiding a NEWER bubble than the one it was scheduled for
+
     private Node2D _targetNode;
     private float _elapsed = 0f;
+
+    // How long State.Attempting sits there before actually resolving —
+    // reaching for an apple, casting a line, reaching into someone's
+    // pocket all take a beat, not an instant frame the moment you're in
+    // range. A SEPARATE counter from _elapsed on purpose: _elapsed is
+    // already mid-count by the time Attempting starts for anything that
+    // needed to walk there first (it's tracking UnreachableTimeout
+    // during Navigating), so reusing it here would let the attempt
+    // resolve on literally the first frame for every action that
+    // required travel — defeating the whole point. Reset at both
+    // Attempting entry points (AssignAction's direct branch, and
+    // ProcessNavigating's arrival transition).
+    private const float AttemptDuration = 1.5f;
+    private float _attemptElapsed = 0f;
 
     // Set by AssignAction() via PathGrid for a "known" destination
     // (anything except "travel"); left null for flagpole travel, or
@@ -83,9 +135,128 @@ public partial class NPCActor : CharacterBody2D
         // an NPC, PlayerCharacter.Initialize() for itself). Creating the
         // node here regardless means both call sites just configure it,
         // never construct it.
-        _sprite = new AnimatedSprite2D { Name = "Sprite", Scale = new Vector2(SpriteScale, SpriteScale) };
+        // Not centered — anchored bottom-center (feet at this node's own
+        // origin), same reasoning and same math as AppleTree's sprite
+        // anchor: Y-sort compares each node's own Position, so it needs
+        // to actually correspond to the visual "standing on the ground"
+        // point for depth to read correctly, not an arbitrary sprite
+        // center floating around the character's torso.
+        _sprite = new AnimatedSprite2D
+        {
+            Name = "Sprite",
+            Scale = new Vector2(SpriteScale, SpriteScale),
+            Centered = false,
+            Offset = new Vector2(-CharacterSpriteBuilder.FrameSize / 2f, -CharacterSpriteBuilder.FrameSize),
+        };
         _sprite.TextureFilter = TextureFilterEnum.Nearest; // keep pixel art crisp regardless of the texture's own import default
         AddChild(_sprite);
+
+        BuildEmotionLabel();
+        BuildSpeechBubble();
+        // Deliberately no initial flash here — showing Neutral the
+        // moment a character spawns isn't a "mood change," it's just
+        // the starting state; the emoji only appears once CurrentEmotion
+        // actually changes to something.
+    }
+
+    private void BuildEmotionLabel()
+    {
+        _emotionLabel = new Label { Name = "EmotionLabel", Position = new Vector2(-14, SpriteTopY - 24f), Visible = false };
+        _emotionLabel.AddThemeFontSizeOverride("font_size", 22);
+        AddChild(_emotionLabel);
+    }
+
+    // A plain "talking..." indicator, not the actual words — the real
+    // line is already in the console log (and, for an NPC, in Memory);
+    // showing the full text above their head too just meant a variable-
+    // length box competing with everything else on screen. This is
+    // fixed-size and fixed-content on purpose: nothing here needs to
+    // resize to fit varying text, so there's no auto-sizing/layout-
+    // timing risk to get wrong blind.
+    private void BuildSpeechBubble()
+    {
+        _speechBubble = new PanelContainer
+        {
+            Name = "SpeechBubble",
+            Position = new Vector2(-45, SpriteTopY - 78f),
+            CustomMinimumSize = new Vector2(90, 0),
+            Visible = false,
+        };
+        _speechBubble.AddThemeStyleboxOverride("panel", new StyleBoxFlat
+        {
+            BgColor = new Color(1f, 1f, 1f, 0.95f), // white cloud, not the old dark box
+            CornerRadiusTopLeft = 10, CornerRadiusTopRight = 10, CornerRadiusBottomLeft = 10, CornerRadiusBottomRight = 10,
+            ContentMarginLeft = 8, ContentMarginRight = 8, ContentMarginTop = 4, ContentMarginBottom = 4,
+        });
+
+        var label = new Label { Text = "talking...", HorizontalAlignment = HorizontalAlignment.Center };
+        label.AddThemeColorOverride("font_color", new Color(0.15f, 0.15f, 0.18f)); // dark text on the white bubble
+        label.AddThemeFontSizeOverride("font_size", 13);
+        _speechBubble.AddChild(label);
+
+        AddChild(_speechBubble);
+    }
+
+    // Shows briefly on an actual mood CHANGE, not every turn — see
+    // CurrentEmotion's setter, the only caller. Same late-timer guard as
+    // ShowSpeechBubble() below: a token, not a flag, so a slow-to-fire
+    // hide from an OLDER flash can't hide a NEWER one that's already
+    // showing a different emoji.
+    private void FlashEmotionEmoji()
+    {
+        if (_emotionLabel == null) return;
+        _emotionLabel.Text = _currentEmotion.ToEmoji();
+        _emotionLabel.Visible = true;
+
+        // processAlways:false — while the game's paused, everything
+        // about a character should be frozen, including how long a
+        // flashed emoji stays up.
+        ulong myToken = ++_emotionToken;
+        GetTree().CreateTimer(2f, processAlways: false).Timeout += () =>
+        {
+            if (myToken == _emotionToken && IsInstanceValid(_emotionLabel))
+                _emotionLabel.Visible = false;
+        };
+    }
+
+    // Called whenever this character actually says something out loud —
+    // speak uses it (see NpcAgent.OnActionCompleted and PlayerCharacter's
+    // chat handling), right alongside the existing SpeechLog.Say() call.
+    // Purely a "they're talking right now" indicator — SpeechLog (and
+    // the console log) still carries the actual words; this never did
+    // and now doesn't try to.
+    public void ShowSpeechBubble(float duration = 2.5f)
+    {
+        if (_speechBubble == null) return;
+        _speechBubble.Visible = true;
+
+        ulong myToken = ++_speechToken;
+        GetTree().CreateTimer(duration, processAlways: false).Timeout += () =>
+        {
+            // Only hide if nothing newer has shown since — otherwise a
+            // slow-to-fire timer from an OLDER line could hide a bubble
+            // that's already showing for a more recent one.
+            if (myToken == _speechToken && IsInstanceValid(_speechBubble))
+                _speechBubble.Visible = false;
+        };
+    }
+
+    // The one authoritative "is sleep currently a real option" rule —
+    // called from Mind's tool-offering/validation for NPCs (via
+    // NpcAgent) and from the action panel's button visibility for the
+    // player, so the rule only lives in one place rather than risking
+    // the two drifting apart. Three tiers: too well-rested to bother
+    // (never offered, anywhere); truly exhausted (offered anywhere —
+    // being desperate doesn't wait for a walk home); everything between
+    // (offered only near home — tired enough to consider it, not
+    // desperate enough to just lie down in a field).
+    public bool CanSleep(Vector2 homePosition)
+    {
+        if (Vitals.Fatigue > Vitals.SleepUnnecessaryThreshold)
+            return false;
+        if (Vitals.NeedsSleep)
+            return true;
+        return GlobalPosition.DistanceTo(homePosition) <= ActionRanges.SleepNearHome;
     }
 
     // Called once, right after construction — NpcFactory picks a variant
@@ -126,9 +297,21 @@ public partial class NPCActor : CharacterBody2D
         CurrentAction = action;
         _elapsed = 0f;
 
+        // Checked before the generic targetless branch below — sleep is
+        // ALSO targetless, but needs its own dedicated state (real
+        // duration, immobility) rather than the instant-resolve those
+        // other targetless actions (wait) get.
+        if (action.Id == "sleep")
+        {
+            _state = State.Sleeping;
+            BeginSleepVisual();
+            return;
+        }
+
         if (action.TargetId == "")
         {
             _state = State.Attempting;
+            _attemptElapsed = 0f;
             return;
         }
 
@@ -144,17 +327,17 @@ public partial class NPCActor : CharacterBody2D
 
         // "travel" is the flagpole case — the path is unknown by
         // design, not a grid-coverage gap, so it always walks straight
-        // at the target. "follow", "trade", "steal", and "persuade" all
-        // target a MOVING NPCActor (or PlayerCharacter — same class) —
-        // a path computed once at the instant this action starts would
-        // go stale the moment the target takes a step, so all four
-        // always walk straight at wherever the target currently is too
-        // (the same live GlobalPosition read every physics frame that
+        // at the target. "follow", "trade", and "steal" all target a
+        // MOVING NPCActor (or PlayerCharacter — same class) — a path
+        // computed once at the instant this action starts would go
+        // stale the moment the target takes a step, so all three always
+        // walk straight at wherever the target currently is too (the
+        // same live GlobalPosition read every physics frame that
         // already makes following work at all). Everything else is a
         // "known," stationary destination and routes through A* when a
         // route exists; a null result (no path found) falls back to the
         // same direct movement.
-        _waypoints = (action.Id == "travel" || action.Id == "follow" || action.Id == "trade" || action.Id == "steal" || action.Id == "persuade")
+        _waypoints = (action.Id == "travel" || action.Id == "follow" || action.Id == "trade" || action.Id == "steal")
             ? null
             : PathGrid.FindPath(GlobalPosition, _targetNode.GlobalPosition);
         _waypointIndex = 0;
@@ -178,11 +361,70 @@ public partial class NPCActor : CharacterBody2D
                 ProcessNavigating((float)delta);
                 break;
             case State.Attempting:
-                ProcessAttempting();
+                ProcessAttempting((float)delta);
+                break;
+            case State.Sleeping:
+                ProcessSleeping((float)delta);
                 break;
         }
 
-        UpdateSpriteFacing();
+        // Sleeping drives its own visual (rotated sprite, no walk/idle
+        // switching) via BeginSleepVisual()/EndSleepVisual() — skip the
+        // normal facing/animation logic entirely while asleep instead of
+        // fighting it every frame.
+        if (_state != State.Sleeping)
+            UpdateSpriteFacing();
+    }
+
+    private const float SleepDuration = 20f;
+
+    private void ProcessSleeping(float delta)
+    {
+        // No Velocity change, no MoveAndSlide() call — simply not moving
+        // this body is what "immobile" means for a CharacterBody2D;
+        // there's nothing else that could move it out from under this.
+        _elapsed += delta;
+        if (_elapsed < SleepDuration)
+            return;
+
+        Vitals.Sleep();
+        EndSleepVisual();
+        Finish(true, "ok");
+    }
+
+    // A cheap way to read as "lying down" without new art — the
+    // existing character sheet has no sleeping pose to switch to, so
+    // this rotates the whole sprite on its side instead. Zzz is a
+    // separate, deliberately reused slot: it borrows the emotion
+    // emoji's position/label rather than adding a third above-the-head
+    // element, since the two never need to show at once anyway.
+    private void BeginSleepVisual()
+    {
+        _sprite.RotationDegrees = 90f;
+        if (_emotionLabel != null)
+        {
+            // Bumping the token (not just setting Text/Visible) matters:
+            // NpcAgent sets CurrentEmotion right before AssignAction(),
+            // so a turn that BOTH changes mood AND chooses sleep starts
+            // a 2-second FlashEmotionEmoji hide-timer moments before this
+            // runs. Without invalidating it, that timer fires ~2s later
+            // and hides Zzz for the remaining ~18s of a 20s sleep — its
+            // token check has no idea sleep started and would just see
+            // "nothing newer has shown since," which used to be true.
+            _emotionToken++;
+            _emotionLabel.Text = "💤";
+            _emotionLabel.Visible = true;
+        }
+    }
+
+    private void EndSleepVisual()
+    {
+        _sprite.RotationDegrees = 0f;
+        // Back to hidden, same as any other turn where nothing just
+        // changed mood — not the woken-up emotion's emoji, since waking
+        // up isn't itself a CurrentEmotion change.
+        if (_emotionLabel != null)
+            _emotionLabel.Visible = false;
     }
 
     private void ProcessNavigating(float delta)
@@ -206,6 +448,7 @@ public partial class NPCActor : CharacterBody2D
         {
             Velocity = Vector2.Zero;
             _state = State.Attempting;
+            _attemptElapsed = 0f;
             return;
         }
 
@@ -236,18 +479,21 @@ public partial class NPCActor : CharacterBody2D
         MoveAndSlide();
     }
 
-    private void ProcessAttempting()
+    private void ProcessAttempting(float delta)
     {
-        // Checked before the generic "no target" branch below, since
-        // sleep is also targetless but needs its own effect (restoring
-        // Vitals) rather than just resolving as a no-op like wait does.
-        if (CurrentAction.Id == "sleep")
-        {
-            Vitals.Sleep();
-            Finish(true, "ok");
+        // Hold here for a beat before actually resolving anything below
+        // — see AttemptDuration's own comment. No movement, no visual
+        // change needed for this wait itself; PlayerCharacter surfaces
+        // its own "in progress" UI for the duration (see its
+        // ActiveActionLabel), and an NPC's fixed idle pose already
+        // reads fine as "doing something" for a second and a half.
+        _attemptElapsed += delta;
+        if (_attemptElapsed < AttemptDuration)
             return;
-        }
 
+        // sleep no longer comes through here at all — AssignAction()
+        // routes it straight to State.Sleeping, since it needs a real
+        // duration and immobility, not an instant resolve.
         if (CurrentAction.TargetId == "")
         {
             Finish(true, "ok");
@@ -267,12 +513,12 @@ public partial class NPCActor : CharacterBody2D
             return;
         }
 
-        // "trade", "steal", and "persuade" all resolve directly against
-        // another character rather than a world resource — neither is
+        // "trade" and "steal" both resolve directly against another
+        // character rather than a world resource — neither is
         // IInteractable (there's no "gathering rules" to ask a person),
         // and the target here is literally another NPCActor (or
         // PlayerCharacter, since it IS one).
-        if (CurrentAction.Id == "trade" || CurrentAction.Id == "steal" || CurrentAction.Id == "persuade")
+        if (CurrentAction.Id == "trade" || CurrentAction.Id == "steal")
         {
             if (_targetNode is not NPCActor targetActor || !IsInstanceValid(_targetNode))
             {
@@ -330,20 +576,6 @@ public partial class NPCActor : CharacterBody2D
                 Finish(true, "ok", rollData);
                 return;
             }
-
-            // persuade: an opposed Charisma check — the actor's own
-            // roll against the target's passive Charisma DC. This never
-            // forces the target's next decision (see Mind's ActInstruction
-            // — nothing here compels anyone); it only decides whether
-            // the attempt LANDS as compelling or falls flat, which
-            // NpcAgent folds into how the target hears it, exactly like
-            // any other spoken line — the target's Mind still decides
-            // for itself what to do about it, next turn, same as always.
-            var persuadeCheck = SkillCheck.Roll(Stats.CharismaMod, DifficultyClass.OpposedBase + targetActor.Stats.CharismaMod);
-            var persuadeData = persuadeCheck.ToData("charisma");
-            persuadeData["target"] = CurrentAction.TargetId;
-            Finish(persuadeCheck.Success, persuadeCheck.Success ? "persuasive" : "unconvincing", persuadeData);
-            return;
         }
 
         // The target owns its own rules about whether the attempt

@@ -15,14 +15,24 @@ using System.Threading.Tasks;
 // small tool-calling model until proven otherwise.
 //
 // Every action here — gathering, deposit, travel, speak, follow, trade,
-// steal, persuade, sleep, wait — is offered identically to every NPC's
-// tool schema (some gated on context: travel/follow/trade/steal/persuade
-// only appear when there's actually a valid target, never as a dead
-// enum-of-nothing option). Nothing in this file, or anywhere else,
-// decides which NPC "is" the fisher, or the thief, or the leader.
-// Whatever role an NPC settles into is purely a consequence of the model
-// reading its Personality.DescribeForPrompt() framing and choosing
-// accordingly.
+// steal, sleep, wait — is offered identically to every NPC's tool schema
+// (some gated on context: travel/follow/trade/steal only appear when
+// there's actually a valid target, never as a dead enum-of-nothing
+// option). Nothing in this file, or anywhere else, decides which NPC
+// "is" the fisher, or the thief, or the leader. Whatever role an NPC
+// settles into is purely a consequence of the model reading its
+// Personality.DescribeForPrompt() framing and choosing accordingly.
+//
+// Deliberately no "persuade" action — persuasion isn't a thing you DO
+// to someone with a dice roll, it's an outcome of what you actually
+// say. speak already carries any pitch, argument, or appeal a
+// character wants to make, word for word; whoever hears it (SpeechLog,
+// folded into their own perception next turn) decides for themselves,
+// by genuinely reasoning about it, whether they're convinced — the
+// same way they decide how to react to anything else they hear. A
+// separate mechanical action with its own Charisma check would just be
+// a coin flip standing in front of that reasoning instead of letting
+// it happen.
 public class Mind
 {
     // Instruction only — "how to respond." "Who you are" comes from
@@ -31,23 +41,53 @@ public class Mind
     private const string ThinkInstruction =
         "Given the situation below, write ONE short, plain sentence (under 15 words) of what you're actually thinking right now. Talk like a real person thinking to themselves, not a novelist — no metaphors, no describing the scenery, no flowery language. If your last action failed, especially more than once, say so plainly and react to it. Just the plain thought, nothing else.";
     private const string ActInstruction =
-        "Call exactly one of the provided tools that matches the plan below. If your last action failed — especially if it failed more than once in a row for the same reason — do not just repeat it; pick something that actually addresses why it failed (e.g. deposit before trying to pick or catch again, or choose a different target if one is depleted). travel is a valid choice on its own, out of curiosity, even toward somewhere you've never been and don't know the way to — you don't need a resource-gathering reason to go look at something. speak lets you say something out loud in your own words — anyone within hearing range right now may hear it and decide how to react on their own later; it does not control or compel anyone, and if nobody's around, nobody hears it, which is a perfectly normal outcome of speaking. follow lets you walk alongside someone nearby by name — a genuine choice you make (or don't) based on your own read of them and what's been said, not something anyone can force; re-decide it fresh every turn just like anything else, so if your mood shifts or you're no longer convinced, choosing something other than follow is exactly how you stop. trade gives someone nearby an item you're actually carrying — a real choice about generosity or self-interest, entirely up to you. steal takes an item from someone nearby without asking and without them agreeing to it — you don't know for certain what they're carrying, only a guess, it takes real nerve and a little luck (you can simply fail even if they do have it), and it's not hidden from them forever, since anyone keeps their own count of what they're carrying and can notice later that something's missing. persuade is a real, focused attempt to talk someone nearby into something — how well it lands depends on you, not just what you say, and it never forces their next decision either way; a failed attempt is worth noticing and not just repeating verbatim. sleep rests where you are and fully restores your fatigue, but takes a while — worth doing once you're actually tired, not as a routine choice, and pay attention to your own fatigue level below: if you're exhausted, that's a real, physical reason to sleep before doing anything else, or to turn down something demanding (a long trip, more gathering) rather than push through it — nobody is forcing that consideration on you, it's just true of your own body right now. Set emotion to how you're genuinely feeling, reacting to what just happened as much as your personality — frustration or disappointment after a repeated failure, satisfaction after a success, not a fixed mood. Only ever target an id that is explicitly listed in the situation — never invent one that isn't there. Choose whichever tool actually fits who you are and what you want right now — nothing assigns you a role.";
+        "Call exactly one of the provided tools that matches the plan below. If you were already in the middle of something — following someone, traveling somewhere, working toward a goal you'd set for yourself — lean toward sticking with it for a while rather than switching every single turn just because you technically can; a goal worth having is worth a bit of follow-through. Only actually change course when it's genuinely finished, clearly not working out, or something that actually matters more just happened — a real reason, not a passing whim. (Nothing here checks for it yet, but the same logic would apply to something urgent and important suddenly appearing, like a dangerous animal — react to what's actually in front of you, not to novelty for its own sake.) If your last action failed — especially if it failed more than once in a row for the same reason — do not just repeat it; pick something that actually addresses why it failed (e.g. deposit before trying to pick or catch again, or choose a different target if one is depleted). travel is a valid choice on its own, out of curiosity, even toward somewhere you've never been and don't know the way to — you don't need a resource-gathering reason to go look at something. speak lets you say something out loud in your own words — anyone within hearing range right now may hear it and decide how to react on their own later, including being persuaded, won over, or talked into something if what you say actually lands with them; it does not control or compel anyone, and if nobody's around, nobody hears it, which is a perfectly normal outcome of speaking. follow lets you walk alongside someone nearby by name — a genuine choice you make (or don't) based on your own read of them and what's been said, not something anyone can force; re-decide it fresh every turn just like anything else, which means choosing follow AGAIN, turn after turn, is what actually keeps you with them — arriving next to them once doesn't mean you're done, they may well walk on right after, and only choosing something else is what actually stops you following. trade gives someone nearby an item you're actually carrying — a real choice about generosity or self-interest, entirely up to you. steal takes an item from someone nearby without asking and without them agreeing to it — you don't know for certain what they're carrying, only a guess, it takes real nerve and a little luck (you can simply fail even if they do have it), and it's not hidden from them forever, since anyone keeps their own count of what they're carrying and can notice later that something's missing. sleep rests where you are and fully restores your fatigue, but takes a while — worth doing once you're actually tired, not as a routine choice, and pay attention to your own fatigue level below: if you're exhausted, that's a real, physical reason to sleep before doing anything else, or to turn down something demanding (a long trip, more gathering) rather than push through it — nobody is forcing that consideration on you, it's just true of your own body right now. Set emotion to how you're genuinely feeling, reacting to what just happened as much as your personality — frustration or disappointment after a repeated failure, satisfaction after a success, not a fixed mood. Only ever target an id that is explicitly listed in the situation — never invent one that isn't there. Choose whichever tool actually fits who you are and what you want right now — nothing assigns you a role.";
     private const string SummarizeSystemPrompt =
         "You are compressing an NPC's memory log into a short diary paragraph (3-5 sentences) they'll carry forward. Preserve what matters for future decisions — where they've been, what they've done, anything notable, and anything said aloud (by them or heard from someone else), including who said or asked for what by name. A repeated identical failure is NOT routine detail — it's the opposite: state plainly what failed, why, and how many times, so it isn't attempted again pointlessly. Drop only genuinely routine, non-repeated detail (a single successful wait, a normal walk). Write in first person, past tense.";
 
-    private static readonly string[] ValidActions = { "pick_apple", "catch_fish", "deposit", "travel", "speak", "follow", "trade", "steal", "persuade", "sleep", "wait" };
+    private static readonly string[] ValidActions = { "pick_apple", "catch_fish", "gather_pinecone", "gather_berry", "deposit", "travel", "speak", "follow", "trade", "steal", "sleep", "wait" };
 
     // Every item type that currently exists in the world — trade/steal
     // both need a fixed, enumerable answer to "which item" for the tool
     // schema. Grows the day a new resource type does, same as
     // ActionRanges already does per-action.
-    private static readonly string[] ItemTypes = { "apple", "fish" };
+    private static readonly string[] ItemTypes = { "apple", "fish", "pinecone", "blueberry", "blackberry", "raspberry" };
 
     private readonly ILlmProvider _provider;
 
     public Mind(ILlmProvider provider)
     {
         _provider = provider;
+    }
+
+    // Bundles every "what's actually available to choose from right
+    // now" list Decide()/BuildTools()/ParseToolCall() all need — this
+    // used to be seven-plus positional string[]/bool parameters passed
+    // identically through all three, which was already unwieldy before
+    // gather_pinecone/gather_berry needed two more; one struct instead
+    // of growing that list a third time.
+    public readonly struct AvailableTargets
+    {
+        public readonly string[] TreeIds;
+        public readonly string[] FishingSpotIds;
+        public readonly string[] PineTreeIds;
+        public readonly string[] BerryBushIds;
+        public readonly string[] TravelTargetIds;
+        public readonly string[] NearbyNpcNames;
+        public readonly string[] CarriedItems;
+        public readonly bool SleepAllowed;
+
+        public AvailableTargets(string[] treeIds, string[] fishingSpotIds, string[] pineTreeIds, string[] berryBushIds, string[] travelTargetIds, string[] nearbyNpcNames, string[] carriedItems, bool sleepAllowed)
+        {
+            TreeIds = treeIds;
+            FishingSpotIds = fishingSpotIds;
+            PineTreeIds = pineTreeIds;
+            BerryBushIds = berryBushIds;
+            TravelTargetIds = travelTargetIds;
+            NearbyNpcNames = nearbyNpcNames;
+            CarriedItems = carriedItems;
+            SleepAllowed = sleepAllowed;
+        }
     }
 
     public readonly struct MindResult
@@ -69,7 +109,7 @@ public class Mind
         public static MindResult Success(string thought, GameAction action) => new(true, null, thought, action);
     }
 
-    public async Task<MindResult> Decide(string perceptionText, string[] treeIds, string[] fishingSpotIds, string[] travelTargetIds, string[] nearbyNpcNames, string[] carriedItems, Personality personality)
+    public async Task<MindResult> Decide(string perceptionText, AvailableTargets targets, Personality personality)
     {
         string persona = personality.DescribeForPrompt();
         float temperature = personality.Temperature;
@@ -90,7 +130,7 @@ public class Mind
             new { role = "system", content = $"{persona}\n\n{ActInstruction}" },
             new { role = "user", content = $"{perceptionText}\n\nYour plan: {thought}" },
         };
-        object[] tools = BuildTools(treeIds, fishingSpotIds, travelTargetIds, nearbyNpcNames, carriedItems);
+        object[] tools = BuildTools(targets);
 
         // A malformed or missing tool call (no_tool_call, an unknown
         // action, a bad target) is model flakiness on that one attempt,
@@ -108,7 +148,7 @@ public class Mind
             if (!actResult.Ok)
                 return MindResult.Fail($"act_{actResult.Error}", thought);
 
-            parsed = ParseToolCall(actResult.Message, treeIds, fishingSpotIds, travelTargetIds, nearbyNpcNames, carriedItems);
+            parsed = ParseToolCall(actResult.Message, targets);
             if (parsed.Ok)
                 return MindResult.Success(thought, parsed.Action);
         }
@@ -168,7 +208,7 @@ public class Mind
     // and a GameAction the engine is allowed to act on. An unrecognized
     // action name or a target that isn't in the world right now is
     // rejected here, explicitly, rather than assumed valid.
-    private ParseResult ParseToolCall(ChatMessage message, string[] treeIds, string[] fishingSpotIds, string[] travelTargetIds, string[] nearbyNpcNames, string[] carriedItems)
+    private ParseResult ParseToolCall(ChatMessage message, AvailableTargets targets)
     {
         if (message.ToolCalls is not { Length: > 0 })
             return ParseResult.Fail("no_tool_call");
@@ -187,13 +227,21 @@ public class Mind
         switch (name)
         {
             case "pick_apple":
-                if (Array.IndexOf(treeIds, targetId) < 0)
+                if (Array.IndexOf(targets.TreeIds, targetId) < 0)
                     return ParseResult.Fail($"invalid_target_{targetId}");
                 return ParseResult.Success(new GameAction(name, targetId, ActionRanges.PickApple, emotion));
             case "catch_fish":
-                if (Array.IndexOf(fishingSpotIds, targetId) < 0)
+                if (Array.IndexOf(targets.FishingSpotIds, targetId) < 0)
                     return ParseResult.Fail($"invalid_target_{targetId}");
                 return ParseResult.Success(new GameAction(name, targetId, ActionRanges.CatchFish, emotion));
+            case "gather_pinecone":
+                if (Array.IndexOf(targets.PineTreeIds, targetId) < 0)
+                    return ParseResult.Fail($"invalid_target_{targetId}");
+                return ParseResult.Success(new GameAction(name, targetId, ActionRanges.GatherPinecone, emotion));
+            case "gather_berry":
+                if (Array.IndexOf(targets.BerryBushIds, targetId) < 0)
+                    return ParseResult.Fail($"invalid_target_{targetId}");
+                return ParseResult.Success(new GameAction(name, targetId, ActionRanges.GatherBerry, emotion));
             case "deposit":
                 // Only one valid target exists for this tool — a small
                 // model sometimes omits an enum-of-one argument even
@@ -206,7 +254,7 @@ public class Mind
                     return ParseResult.Fail($"invalid_target_{targetId}");
                 return ParseResult.Success(new GameAction(name, targetId, ActionRanges.Deposit, emotion));
             case "travel":
-                if (Array.IndexOf(travelTargetIds, targetId) < 0)
+                if (Array.IndexOf(targets.TravelTargetIds, targetId) < 0)
                     return ParseResult.Fail($"invalid_target_{targetId}");
                 return ParseResult.Success(new GameAction(name, targetId, ActionRanges.Travel, emotion));
             case "speak":
@@ -218,26 +266,26 @@ public class Mind
                     return ParseResult.Fail("empty_message");
                 return ParseResult.Success(new GameAction(name, "", 0f, emotion, spokenMessage));
             case "follow":
-                if (Array.IndexOf(nearbyNpcNames, targetId) < 0)
+                if (Array.IndexOf(targets.NearbyNpcNames, targetId) < 0)
                     return ParseResult.Fail($"invalid_target_{targetId}");
                 return ParseResult.Success(new GameAction(name, targetId, ActionRanges.Follow, emotion));
             case "trade":
             {
-                if (Array.IndexOf(nearbyNpcNames, targetId) < 0)
+                if (Array.IndexOf(targets.NearbyNpcNames, targetId) < 0)
                     return ParseResult.Fail($"invalid_target_{targetId}");
                 string item = ExtractField(fn.Arguments, "item");
                 // Can only ever offer what you actually have — the tool
                 // schema already restricts the enum to carriedItems, but
                 // a small model can still miss the enum, so this is the
                 // real trust boundary, not just the schema.
-                if (Array.IndexOf(carriedItems, item) < 0)
+                if (Array.IndexOf(targets.CarriedItems, item) < 0)
                     return ParseResult.Fail($"invalid_item_{item}");
                 int amount = ParseAmount(fn.Arguments);
                 return ParseResult.Success(new GameAction(name, targetId, ActionRanges.Trade, emotion, item: item, amount: amount));
             }
             case "steal":
             {
-                if (Array.IndexOf(nearbyNpcNames, targetId) < 0)
+                if (Array.IndexOf(targets.NearbyNpcNames, targetId) < 0)
                     return ParseResult.Fail($"invalid_target_{targetId}");
                 string item = ExtractField(fn.Arguments, "item");
                 if (Array.IndexOf(ItemTypes, item) < 0)
@@ -245,16 +293,14 @@ public class Mind
                 int amount = ParseAmount(fn.Arguments);
                 return ParseResult.Success(new GameAction(name, targetId, ActionRanges.Steal, emotion, item: item, amount: amount));
             }
-            case "persuade":
-            {
-                if (Array.IndexOf(nearbyNpcNames, targetId) < 0)
-                    return ParseResult.Fail($"invalid_target_{targetId}");
-                string pitch = ExtractField(fn.Arguments, "message");
-                if (string.IsNullOrWhiteSpace(pitch))
-                    return ParseResult.Fail("empty_message");
-                return ParseResult.Success(new GameAction(name, targetId, ActionRanges.Persuade, emotion, message: pitch));
-            }
             case "sleep":
+                // The tool schema already omits "sleep" entirely when
+                // !sleepAllowed (see BuildTools), so this only ever
+                // catches a model calling it anyway — the same
+                // "schema is a hint, this is the real trust boundary"
+                // posture every other case here already has.
+                if (!targets.SleepAllowed)
+                    return ParseResult.Fail("sleep_not_available");
                 return ParseResult.Success(new GameAction(name, "", 0f, emotion));
             default: // "wait"
                 return ParseResult.Success(new GameAction("wait", "", 0f, emotion));
@@ -292,7 +338,7 @@ public class Mind
         };
     }
 
-    private static object[] BuildTools(string[] treeIds, string[] fishingSpotIds, string[] travelTargetIds, string[] nearbyNpcNames, string[] carriedItems)
+    private static object[] BuildTools(AvailableTargets targets)
     {
         var tools = new System.Collections.Generic.List<object>
         {
@@ -308,7 +354,7 @@ public class Mind
                         type = "object",
                         properties = new
                         {
-                            target_id = new { type = "string", @enum = treeIds, description = "which tree to pick from" },
+                            target_id = new { type = "string", @enum = targets.TreeIds, description = "which tree to pick from" },
                             emotion = new { type = "string", @enum = EmotionExtensions.AllValues, description = "how you're feeling right now" },
                         },
                         required = new[] { "target_id", "emotion" },
@@ -327,7 +373,7 @@ public class Mind
                         type = "object",
                         properties = new
                         {
-                            target_id = new { type = "string", @enum = fishingSpotIds, description = "which fishing spot to try" },
+                            target_id = new { type = "string", @enum = targets.FishingSpotIds, description = "which fishing spot to try" },
                             emotion = new { type = "string", @enum = EmotionExtensions.AllValues, description = "how you're feeling right now" },
                         },
                         required = new[] { "target_id", "emotion" },
@@ -376,26 +422,8 @@ public class Mind
                 type = "function",
                 function = new
                 {
-                    name = "sleep",
-                    description = "Rest right where you are and fully restore your fatigue. Takes a while — a real choice for when you're actually tired, not routine.",
-                    parameters = new
-                    {
-                        type = "object",
-                        properties = new
-                        {
-                            emotion = new { type = "string", @enum = EmotionExtensions.AllValues, description = "how you're feeling right now" },
-                        },
-                        required = new[] { "emotion" },
-                    },
-                },
-            },
-            new
-            {
-                type = "function",
-                function = new
-                {
                     name = "speak",
-                    description = "Say something out loud, in your own words. Anyone within hearing range right now may hear it and decide how to react on their own, later — this does not control or compel anyone, and if nobody's around, nobody hears it.",
+                    description = "Say something out loud, in your own words — a greeting, a story, an argument, a pitch trying to talk someone into something, anything. Anyone within hearing range right now may hear it and decide how to react on their own, later, including being persuaded if what you say actually lands with them — this does not control or compel anyone, and if nobody's around, nobody hears it.",
                     parameters = new
                     {
                         type = "object",
@@ -410,10 +438,92 @@ public class Mind
             },
         };
 
+        // Only offered when NPCActor.CanSleep() says the conditions are
+        // actually met right now (see its comment for the three-tier
+        // rule: never above SleepUnnecessaryThreshold, always below
+        // LowFatigueThreshold, otherwise only near home) — same
+        // "conditionally offered, not just always there" treatment as
+        // gather_pinecone/gather_berry/travel/follow/trade/steal below.
+        if (targets.SleepAllowed)
+        {
+            tools.Add(new
+            {
+                type = "function",
+                function = new
+                {
+                    name = "sleep",
+                    description = "Rest right where you are and fully restore your fatigue. Takes a while — a real choice for when you're actually tired, not routine.",
+                    parameters = new
+                    {
+                        type = "object",
+                        properties = new
+                        {
+                            emotion = new { type = "string", @enum = EmotionExtensions.AllValues, description = "how you're feeling right now" },
+                        },
+                        required = new[] { "emotion" },
+                    },
+                },
+            });
+        }
+
+        // Only offered when there's actually a pine tree to gather
+        // from — an enum-of-nothing tool can never be called validly,
+        // so omit it rather than offer a dead option. Unlike pick_apple/
+        // catch_fish (hand-placed and guaranteed to exist from the
+        // start), pine trees can be purely exploration-generated in
+        // principle, so this can't assume the enum is never empty the
+        // way those two do.
+        if (targets.PineTreeIds.Length > 0)
+        {
+            tools.Add(new
+            {
+                type = "function",
+                function = new
+                {
+                    name = "gather_pinecone",
+                    description = "Walk to a pine tree and gather a pinecone from it.",
+                    parameters = new
+                    {
+                        type = "object",
+                        properties = new
+                        {
+                            target_id = new { type = "string", @enum = targets.PineTreeIds, description = "which pine tree to gather from" },
+                            emotion = new { type = "string", @enum = EmotionExtensions.AllValues, description = "how you're feeling right now" },
+                        },
+                        required = new[] { "target_id", "emotion" },
+                    },
+                },
+            });
+        }
+
+        // Same reasoning as gather_pinecone above.
+        if (targets.BerryBushIds.Length > 0)
+        {
+            tools.Add(new
+            {
+                type = "function",
+                function = new
+                {
+                    name = "gather_berry",
+                    description = "Walk to a berry bush and pick a berry from it — whichever kind that particular bush actually grows.",
+                    parameters = new
+                    {
+                        type = "object",
+                        properties = new
+                        {
+                            target_id = new { type = "string", @enum = targets.BerryBushIds, description = "which berry bush to gather from" },
+                            emotion = new { type = "string", @enum = EmotionExtensions.AllValues, description = "how you're feeling right now" },
+                        },
+                        required = new[] { "target_id", "emotion" },
+                    },
+                },
+            });
+        }
+
         // Only offered when there's actually a flagpole to name — an
         // enum-of-nothing tool can never be called validly, so omit it
         // rather than offer a dead option.
-        if (travelTargetIds.Length > 0)
+        if (targets.TravelTargetIds.Length > 0)
         {
             tools.Add(new
             {
@@ -427,7 +537,7 @@ public class Mind
                         type = "object",
                         properties = new
                         {
-                            target_id = new { type = "string", @enum = travelTargetIds, description = "which distant landmark to head toward" },
+                            target_id = new { type = "string", @enum = targets.TravelTargetIds, description = "which distant landmark to head toward" },
                             emotion = new { type = "string", @enum = EmotionExtensions.AllValues, description = "how you're feeling right now" },
                         },
                         required = new[] { "target_id", "emotion" },
@@ -438,7 +548,7 @@ public class Mind
 
         // Same reasoning as travel — offered only when there's actually
         // someone nameable nearby to follow, so the enum is never empty.
-        if (nearbyNpcNames.Length > 0)
+        if (targets.NearbyNpcNames.Length > 0)
         {
             tools.Add(new
             {
@@ -452,7 +562,7 @@ public class Mind
                         type = "object",
                         properties = new
                         {
-                            target_id = new { type = "string", @enum = nearbyNpcNames, description = "the name of who to follow" },
+                            target_id = new { type = "string", @enum = targets.NearbyNpcNames, description = "the name of who to follow" },
                             emotion = new { type = "string", @enum = EmotionExtensions.AllValues, description = "how you're feeling right now" },
                         },
                         required = new[] { "target_id", "emotion" },
@@ -464,7 +574,7 @@ public class Mind
         // Same reasoning as travel/follow — offered only when there's
         // actually someone nearby AND something in hand to offer them,
         // so the item enum is never empty either.
-        if (nearbyNpcNames.Length > 0 && carriedItems.Length > 0)
+        if (targets.NearbyNpcNames.Length > 0 && targets.CarriedItems.Length > 0)
         {
             tools.Add(new
             {
@@ -478,8 +588,8 @@ public class Mind
                         type = "object",
                         properties = new
                         {
-                            target_id = new { type = "string", @enum = nearbyNpcNames, description = "who to give it to" },
-                            item = new { type = "string", @enum = carriedItems, description = "which item to give — only what you're actually carrying" },
+                            target_id = new { type = "string", @enum = targets.NearbyNpcNames, description = "who to give it to" },
+                            item = new { type = "string", @enum = targets.CarriedItems, description = "which item to give — only what you're actually carrying" },
                             amount = new { type = "integer", description = "how many to give (defaults to 1)" },
                             emotion = new { type = "string", @enum = EmotionExtensions.AllValues, description = "how you're feeling right now" },
                         },
@@ -492,7 +602,7 @@ public class Mind
         // steal doesn't require carrying anything yourself, only someone
         // nearby to target — you're guessing at what they have, same as
         // the description says; a wrong guess just fails cleanly.
-        if (nearbyNpcNames.Length > 0)
+        if (targets.NearbyNpcNames.Length > 0)
         {
             tools.Add(new
             {
@@ -506,37 +616,12 @@ public class Mind
                         type = "object",
                         properties = new
                         {
-                            target_id = new { type = "string", @enum = nearbyNpcNames, description = "who to take it from" },
+                            target_id = new { type = "string", @enum = targets.NearbyNpcNames, description = "who to take it from" },
                             item = new { type = "string", @enum = ItemTypes, description = "which item to try to take" },
                             amount = new { type = "integer", description = "how many to try to take (defaults to 1)" },
                             emotion = new { type = "string", @enum = EmotionExtensions.AllValues, description = "how you're feeling right now" },
                         },
                         required = new[] { "target_id", "item", "emotion" },
-                    },
-                },
-            });
-        }
-
-        // persuade: same nearby-target gating as follow/trade/steal.
-        if (nearbyNpcNames.Length > 0)
-        {
-            tools.Add(new
-            {
-                type = "function",
-                function = new
-                {
-                    name = "persuade",
-                    description = "Make a real, focused attempt to talk someone nearby into something specific. How well it lands depends on you as much as your words — it can fail — and it never forces their next decision either way.",
-                    parameters = new
-                    {
-                        type = "object",
-                        properties = new
-                        {
-                            target_id = new { type = "string", @enum = nearbyNpcNames, description = "who you're trying to persuade" },
-                            message = new { type = "string", description = "what you're trying to convince them of, in your own words" },
-                            emotion = new { type = "string", @enum = EmotionExtensions.AllValues, description = "how you're feeling right now" },
-                        },
-                        required = new[] { "target_id", "message", "emotion" },
                     },
                 },
             });

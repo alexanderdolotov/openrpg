@@ -8,27 +8,96 @@ using System.Collections.Generic;
 //
 // NPCs are entirely data-driven now — see npcs.json (loaded by
 // NpcRoster). Every NPC gets the exact same tool menu from Mind
-// (gathering, deposit, travel, speak, follow, trade, steal, persuade,
-// sleep, wait) regardless of what's in its entry — nothing here or
+// (gathering, deposit, travel, speak, follow, trade, steal, sleep, wait)
+// regardless of what's in its entry — nothing here or
 // anywhere else assigns a role. A backstory leaning toward water is
 // just text; whether that shows up as fishing behavior is entirely up
 // to the LLM reading it. The player (see CreatePlayer() below) gets the
 // same actions too, just decided by input instead of a Mind.
 public partial class Main : Node2D
 {
-    // Must match LogPanel's height in Main.tscn — the camera fit below
-    // needs to know how much of the screen the log actually covers.
-    private const float UiPanelHeight = 270f;
-    private const float CameraMargin = 1.15f; // breathing room around the world's content
+    // How zoomed in the follow camera sits. CORRECTED, verified with an
+    // actual measurement (mapping two points 100 world-units apart
+    // through Camera2D.get_canvas_transform() and checking the resulting
+    // screen-pixel distance) rather than trusted from memory again:
+    // Zoom ABOVE 1 zooms IN (objects appear BIGGER — at zoom 2, 100
+    // world units measured 200 screen px); Zoom BELOW 1 zooms OUT
+    // (smaller — at zoom 0.4, 100 world units measured only 40 screen
+    // px). Every previous pass here (0.65 -> 0.55 -> 0.5 -> 0.4) had
+    // this backwards and was zooming OUT further each time, which is
+    // exactly why it kept feeling more zoomed out despite being asked
+    // for the opposite. This is a real correction, not another nudge —
+    // still a starting value to react to, but now moving the right way.
+    private const float FollowZoom = 1.6f;
 
     private readonly List<AppleTree> _trees = new();
     private readonly List<FishingSpot> _fishingSpots = new();
+    private readonly List<GatherableFoliage> _pineTrees = new();
+    private readonly List<GatherableFoliage> _berryBushes = new();
+
+    // The subset of _fishingSpots placed directly along the river at
+    // boot — the ones RelocateRiverFish() periodically teleports to a
+    // fresh random point and refills (see BuildRiverFishTimer). NOT the
+    // same as exploration-generated standalone spots elsewhere in
+    // _fishingSpots, which stay put per their own established design —
+    // tracked separately so relocation only ever touches this subset.
+    private readonly List<FishingSpot> _riverFishingSpots = new();
+    private River _river;
+
     private readonly Dictionary<string, Node2D> _flagpoles = new(); // distant, non-resource landmarks — see MistyMountains
-    private readonly List<Node2D> _decor = new(); // everything with IHasVisualBounds, for camera fitting — flagpoles deliberately excluded
+    // Everything that can obstruct movement (via IObstacle, feeding
+    // BuildPathGrid()) gets registered here. Also still the complete
+    // set of IHasVisualBounds implementers, though nothing reads that
+    // interface anymore now that the camera follows the player instead
+    // of fitting itself to the whole world — left in place on each
+    // object rather than ripped out, since it's harmless, accurate
+    // metadata about each object's visual footprint that something else
+    // (a minimap, say) could reasonably want later.
+    private readonly List<Node2D> _decor = new();
+
+    // A YSortEnabled container — Godot's built-in mechanism for exactly
+    // "whoever's lower on screen draws in front," re-evaluated every
+    // frame from each child's own Y position. This is what makes walking
+    // above a tree correctly go behind its canopy and walking below it
+    // correctly stay in front, instead of a fixed draw order where
+    // characters (added to the tree after every tree exists) always won
+    // regardless of position.
+    //
+    // Every character (NPC or player) is a DIRECT child of this layer —
+    // NPCActor used to sit one level deeper, under NpcAgent (a plain
+    // Node wrapper for the cognition loop), on the theory that Y-sort
+    // would compose through a non-CanvasItem wrapper transparently the
+    // same way Node2D transform inheritance does. In practice NPCs
+    // rendered wrong against trees (in front of canopy the player
+    // correctly went behind) while sharing otherwise-identical sprite/
+    // anchor code with PlayerCharacter — the one structural difference
+    // was that extra level of nesting. NpcFactory now adds NPCActor
+    // directly here, as a sibling of NpcAgent rather than its child, so
+    // there's one uniform tree depth for every character and nothing
+    // left to reason about there. Scoped to objects with real
+    // "height" a character can walk in front of or behind — Home, trees,
+    // every character. Deliberately NOT water (River, FishingSpot) or
+    // the frontier decorations (mountains/forest/foothills/river-
+    // crossing) — those are flat terrain/backdrop, always rendered
+    // behind this whole layer via plain sibling order in BuildWorld()
+    // (added to Main before this layer even exists), not Y-sorted
+    // against it. They briefly WERE Y-sorted, which was the actual bug
+    // behind a character rendering under the river/mountains: sibling
+    // order at the Main level (not Y-sort, which only reorders within
+    // one YSortEnabled parent) is what decided draw order between this
+    // whole layer and its OWN Main-level siblings, and back then those
+    // terrain pieces happened to be added after this layer, so they won.
+    private Node2D _worldLayer;
+
     private Home _home;
-    private readonly List<string> _logLines = new();
     private RichTextLabel _debugLog;
     private NpcThoughtLogger _thoughtLog;
+
+    // Kept as a field (not just a _Ready()-local) so GenerateContentAt()
+    // can bump ContentVersion whenever exploration-driven generation
+    // adds a tree or fishing spot after boot — see WorldContext and
+    // NpcAgent's TreeIds()/FishingSpotIds() caching.
+    private WorldContext _world;
 
     // IWorldCharacter, not NpcAgent — this is the SAME list WorldContext
     // hands out, and it holds the player alongside every NPC once
@@ -37,12 +106,49 @@ public partial class Main : Node2D
     // targeting) needs to know or care which entries are LLM-driven.
     private readonly List<IWorldCharacter> _agents = new();
 
+    // One-shot: DebugLog's own boot-time spawn/backend lines (logged
+    // during THIS class's _Ready(), below) never actually end up
+    // scrolled into view — verified headlessly that RichTextLabel's
+    // layout geometry (MaxValue/Page) is already correct by frame 0,
+    // but a ScrollToLine() call made DURING _Ready() itself silently
+    // doesn't stick (something in Godot's own internal RichTextLabel
+    // setup resets scroll position after user _Ready() calls run, and
+    // it stays stuck at the top from then on — Log()'s own "was already
+    // at the bottom" check has nothing to recover from, since it never
+    // WAS at the bottom to begin with). _Process() genuinely only ever
+    // runs once Godot's own setup has fully settled, unlike _Ready(),
+    // so catching up here — once, then never again — establishes a
+    // correct starting position for Log()'s ongoing logic to work from.
+    private bool _logScrollCaughtUp = false;
+
+    public override void _Process(double delta)
+    {
+        if (_logScrollCaughtUp) return;
+        _logScrollCaughtUp = true;
+        _debugLog.ScrollToLine(_debugLog.GetLineCount());
+    }
+
     public override void _Ready()
     {
+        // Always — not the default Inherit — specifically so this node's
+        // own _UnhandledKeyInput (the Space shortcut below) and the UI
+        // CanvasLayer's buttons/log/chat (children of Main, still on
+        // Inherit, so they follow Main's own effective mode) keep
+        // working while GetTree().Paused is true. _worldLayer gets its
+        // own explicit Pausable override right where it's created
+        // (BuildWorld()) specifically to still freeze despite that —
+        // Godot's ProcessMode inheritance stops at the first descendant
+        // with a non-Inherit mode of its own, so Main being Always
+        // doesn't leak down past that override.
+        ProcessMode = ProcessModeEnum.Always;
+
         BuildWorld();
+        BuildLighting();
         _debugLog = GetNode<RichTextLabel>("UI/DebugLog");
-        FitCameraToWorld();
         BuildPathGrid();
+
+        var pauseButton = GetNode<Button>("UI/PauseButton");
+        pauseButton.Pressed += TogglePause;
 
         MindConfig config = MindConfig.Load();
         _thoughtLog = new NpcThoughtLogger(config.LogNpcThoughts);
@@ -51,7 +157,8 @@ public partial class Main : Node2D
             (config.LogNpcThoughts ? $" [logging to {_thoughtLog.LogPath}]" : ""), "6f8068");
         _thoughtLog.Log("*", "RUN_START", $"backend={config.Provider} model={config.Model} pure_llm_mode={config.PureLlmMode}");
 
-        var world = new WorldContext { Trees = _trees, FishingSpots = _fishingSpots, Home = _home, Flagpoles = _flagpoles, Agents = _agents };
+        _world = new WorldContext { Trees = _trees, FishingSpots = _fishingSpots, PineTrees = _pineTrees, BerryBushes = _berryBushes, Home = _home, Flagpoles = _flagpoles, Agents = _agents };
+        WorldContext world = _world;
 
         List<NpcDefinition> roster = NpcRoster.Load();
         for (int i = 0; i < roster.Count; i++)
@@ -69,7 +176,7 @@ public partial class Main : Node2D
             // a future UI element (a nameplate, say) wants a per-NPC
             // accent color independent of which sprite variant they got.
             var agent = NpcFactory.Create(
-                this, World(), config, _thoughtLog, Log,
+                _worldLayer, World(), config, _thoughtLog, Log,
                 id: def.Id,
                 personality: personality,
                 startPosition: new Vector2(def.StartX, def.StartY),
@@ -81,7 +188,8 @@ public partial class Main : Node2D
             agent.Start();
         }
 
-        CreatePlayer(world);
+        PlayerCharacter player = CreatePlayer(world);
+        AttachFollowCamera(player);
     }
 
     // Built the same way an NPC is (registered in WorldRegistry, added
@@ -89,7 +197,7 @@ public partial class Main : Node2D
     // own Inventory/Stats/collision) — the only thing missing is a Mind,
     // because nothing here decides for it. StartScreen (run before this
     // scene loads) is where the player actually typed their name.
-    private void CreatePlayer(WorldContext world)
+    private PlayerCharacter CreatePlayer(WorldContext world)
     {
         string name = PlayerStateAutoload()?.PlayerName;
         if (string.IsNullOrWhiteSpace(name))
@@ -99,7 +207,7 @@ public partial class Main : Node2D
         // already at a given key — if the typed name happens to match
         // an NPC's (all NPCs are registered by name before this runs),
         // that NPC would quietly become unreachable by name to every
-        // follow/trade/steal/persuade target lookup, itself included in
+        // follow/trade/steal target lookup, itself included in
         // NearbyNpcNames() twice with no way to tell the two apart.
         // Disambiguating here, once, is cheaper than chasing that bug
         // down later.
@@ -112,7 +220,7 @@ public partial class Main : Node2D
         }
 
         var player = new PlayerCharacter { Name = "Player", Position = new Vector2(150, 340) }; // just south of Home, in the open
-        AddChild(player);
+        _worldLayer.AddChild(player); // same YSortEnabled layer as trees/Home/NPCs — see its field comment
         player.Initialize(
             name,
             world,
@@ -120,6 +228,7 @@ public partial class Main : Node2D
             Log,
             GetNode<LineEdit>("UI/ChatInput"),
             GetNode("UI/ActionPanel"),
+            GetNode("UI/VitalsPanel"),
             playerId: "player",
             keys: PlayerCharacter.KeyBindings.WasdAndArrows);
 
@@ -129,6 +238,23 @@ public partial class Main : Node2D
 
         Log($"[player] {player.DisplayName} joins — {player.Stats.Describe()}", "9fc98a");
         _thoughtLog.Log("player", "SPAWN", $"{player.DisplayName} — {player.Stats.Describe()}");
+        return player;
+    }
+
+    // Reparents the scene's own Camera2D onto the player — a Camera2D
+    // simply tracks its parent's position every frame with zero extra
+    // code, which is what makes this "follow" rather than the old
+    // "recompute a static fit once at boot" approach. Has to happen
+    // after CreatePlayer(), since there's nothing to reparent onto
+    // before the player exists.
+    private void AttachFollowCamera(PlayerCharacter player)
+    {
+        var camera = GetNode<Camera2D>("Camera2D");
+        camera.Reparent(player, keepGlobalTransform: false);
+        camera.Position = Vector2.Zero;
+        camera.Zoom = new Vector2(FollowZoom, FollowZoom);
+        camera.PositionSmoothingEnabled = true;
+        camera.PositionSmoothingSpeed = 8f;
     }
 
     private PlayerState PlayerStateAutoload() => GetNodeOrNull<PlayerState>("/root/PlayerState");
@@ -153,29 +279,36 @@ public partial class Main : Node2D
     {
         BuildGround();
 
-        _home = new Home { Name = "Home", Position = new Vector2(150, 220) };
-        AddChild(_home);
-        World().Register("home", _home);
-        _decor.Add(_home);
-
-        Vector2[] treePositions = { new(600, 120), new(800, 180), new(680, 380) };
-        for (int i = 0; i < treePositions.Length; i++)
-        {
-            var tree = new AppleTree { Name = $"Tree{i}", Position = treePositions[i], AppleCount = 3 };
-            AddChild(tree);
-            World().Register($"tree_{i}", tree);
-            _trees.Add(tree);
-            _decor.Add(tree);
-        }
-
-        var river = new River { Name = "River", Position = new Vector2(560, 620) };
+        // Flat terrain/backdrop — water and distant scenery, never a
+        // thing a character reads as "in front of" or "behind." Added
+        // to Main directly, and specifically BEFORE _worldLayer exists,
+        // so plain Node sibling order (later added = drawn on top) puts
+        // the whole Y-sorted layer — Home, trees, every character — in
+        // front of all of it unconditionally. Y-sorting these instead
+        // would be the wrong tool anyway: a Y-sort compares POSITIONS,
+        // and it briefly did exactly that here, which is what let the
+        // river and mountains — both added as later siblings than
+        // _worldLayer at the time — win the sibling-order tiebreak and
+        // render on top of it regardless of anyone's actual position.
+        // Length/Waves both grown from the original 1050/2 — "stretches
+        // quite far" — keeping roughly the same waves-per-length ratio
+        // so the meander still reads at a similar visual frequency
+        // rather than a few waves stretched thin across the new length.
+        var river = new River { Name = "River", Position = new Vector2(560, 620), Length = 2600f, Waves = 5f };
         AddChild(river);
         _decor.Add(river);
+        _river = river;
 
         // Placed exactly on the river's actual (wavy) centerline at
         // each x, rather than a fixed y — a straight-line guess would
-        // land off the water at some points along a sine curve.
-        float[] fishingX = { 260f, 860f };
+        // land off the water at some points along a sine curve. Same
+        // "always behind, added before _worldLayer exists" terrain
+        // treatment as River itself. These five specifically are the
+        // ones RelocateRiverFish() periodically teleports to a fresh
+        // random point along the (now much longer) river — tracked in
+        // _riverFishingSpots for that, separate from any exploration-
+        // generated standalone spot elsewhere, which stays put.
+        float[] fishingX = { -700f, -200f, 400f, 1000f, 1600f };
         foreach (float x in fishingX)
         {
             var spot = new FishingSpot
@@ -187,22 +320,17 @@ public partial class Main : Node2D
             AddChild(spot);
             World().Register($"fish_{_fishingSpots.Count}", spot);
             _fishingSpots.Add(spot);
+            _riverFishingSpots.Add(spot);
             _decor.Add(spot);
         }
 
-        // The frontier: forest, foothills, and a genuinely deep river
-        // crossing between the village and misty mountains. None of
-        // these get a WorldRegistry id or a tool-schema entry — they're
-        // not destinations, just terrain. "travel" never uses PathGrid
-        // (the path to a flagpole is unknown by design), so the only
-        // thing that routes an NPC around these is reactive physics
-        // collision — bumping into them and sliding past, discovering
-        // the obstacle course the same way the NPC would if it really
-        // didn't know the way. Also deliberately NOT in _decor, same
-        // reasoning as the mountains: frontier terrain shouldn't be
-        // what the camera auto-fits the cozy village view around.
         AddChild(new ForestPatch { Name = "Forest", Position = new Vector2(600, -100) });
         AddChild(new Foothills { Name = "Foothills", Position = new Vector2(820, -220) });
+        // Deep water, same "always behind" treatment as the shallow
+        // River above, despite actually having collision (unlike River)
+        // — a character bounces off it rather than standing on it, so
+        // getting its Y-sort right relative to a character matters much
+        // less than just not letting it paint over someone walking near it.
         AddChild(new RiverCrossing { Name = "DeepRiver", Position = new Vector2(650, -300) });
 
         // Position is a best-effort guess at landing near the top edge
@@ -213,44 +341,355 @@ public partial class Main : Node2D
         AddChild(mountains);
         World().Register("misty_mountains", mountains);
         _flagpoles["misty_mountains"] = mountains;
+
+        // ProcessMode explicitly set, not left on the default Inherit —
+        // Main itself is ProcessModeEnum.Always (see _Ready()), and
+        // without this explicit override, _worldLayer (and everything
+        // under it: Home, trees, every NPC, the player) would inherit
+        // that and never actually freeze on pause. This is what makes
+        // "the world pauses, the UI doesn't" a real split instead of an
+        // accident of tree order.
+        _worldLayer = new Node2D { Name = "WorldLayer", YSortEnabled = true, ProcessMode = ProcessModeEnum.Pausable };
+        AddChild(_worldLayer);
+
+        _home = new Home { Name = "Home", Position = new Vector2(150, 220) };
+        _worldLayer.AddChild(_home);
+        World().Register("home", _home);
+        _decor.Add(_home);
+
+        Vector2[] treePositions = { new(600, 120), new(800, 180), new(680, 380) };
+        for (int i = 0; i < treePositions.Length; i++)
+        {
+            var tree = new AppleTree { Name = $"Tree{i}", Position = treePositions[i], AppleCount = 3 };
+            _worldLayer.AddChild(tree);
+            World().Register($"tree_{i}", tree);
+            _trees.Add(tree);
+            _decor.Add(tree);
+        }
+
+        // Pine trees (gatherable — pinecones), same Y-sorted/collidable
+        // treatment as apple trees, just a different item and sprite.
+        Vector2[] pinePositions = { new(250, 450), new(900, 480) };
+        foreach (Vector2 pos in pinePositions)
+        {
+            int i = _pineTrees.Count;
+            var pine = new GatherableFoliage
+            {
+                Name = $"Pine{i}", Position = pos, Count = 3,
+                ActionId = "gather_pinecone", ItemName = "pinecone",
+                TexturePath = "res://assets/world/pine.png", SpriteScale = 4.5f, TrunkRadius = 12f,
+            };
+            _worldLayer.AddChild(pine);
+            World().Register($"pine_{i}", pine);
+            _pineTrees.Add(pine);
+            _decor.Add(pine);
+        }
+
+        // Berry bushes (gatherable) — one of each kind to start, same
+        // shared sprite with a per-type Modulate tint (see
+        // GatherableFoliage's own header for why there's only one
+        // source sprite for all three).
+        (Vector2 Pos, string Item, Color Tint)[] berries =
+        {
+            (new Vector2(700, 250), "blueberry", new Color(0.5f, 0.9f, 2.0f)),
+            (new Vector2(850, 420), "blackberry", new Color(0.55f, 0.75f, 1.5f)),
+            (new Vector2(300, 380), "raspberry", new Color(1.2f, 0.6f, 0.6f)),
+        };
+        foreach ((Vector2 pos, string item, Color tint) in berries)
+        {
+            int i = _berryBushes.Count;
+            var bush = new GatherableFoliage
+            {
+                Name = $"Berry{i}", Position = pos, Count = 3,
+                ActionId = "gather_berry", ItemName = item,
+                TexturePath = "res://assets/world/bush_berry.png", SpriteScale = 2.5f, TrunkRadius = 8f,
+                Tint = tint,
+            };
+            _worldLayer.AddChild(bush);
+            World().Register($"berry_{i}", bush);
+            _berryBushes.Add(bush);
+            _decor.Add(bush);
+        }
+
+        // Standalone — oak/bare tree/plain bush, nothing to gather, just
+        // scenery to walk around (same as Foothills/ForestPatch aren't
+        // registered in WorldRegistry either — nothing ever needs to
+        // look one of these up by id).
+        var oak0 = new DecorativeFoliage { Name = "Oak0", Position = new Vector2(350, 250), TexturePath = "res://assets/world/oak.png", SpriteScale = 4.5f, TrunkRadius = 12f };
+        var oak1 = new DecorativeFoliage { Name = "Oak1", Position = new Vector2(950, 300), TexturePath = "res://assets/world/oak.png", SpriteScale = 4.5f, TrunkRadius = 12f };
+        var bareTree = new DecorativeFoliage { Name = "BareTree0", Position = new Vector2(500, 550), TexturePath = "res://assets/world/bare_tree.png", SpriteScale = 4.5f, TrunkRadius = 10f };
+        var plainBush = new DecorativeFoliage { Name = "PlainBush0", Position = new Vector2(400, 150), TexturePath = "res://assets/world/bush_plain.png", SpriteScale = 2.5f, TrunkRadius = 8f };
+        foreach (DecorativeFoliage foliage in new[] { oak0, oak1, bareTree, plainBush })
+        {
+            _worldLayer.AddChild(foliage);
+            _decor.Add(foliage);
+        }
+
+        // Everything hand-placed above counts as "already known" —
+        // without this, the instant anyone takes a single step,
+        // WorldExploration would read their own starting region as
+        // newly discovered and immediately start layering random
+        // generated content on top of the curated village. Deliberately
+        // NOT GroundArea (that's WorldExploration.MaxMapBounds now, the
+        // full playable extent — marking THAT explored at boot would
+        // mean nothing ever counts as newly-discovered and generation
+        // could never fire at all) — StartingVillageArea instead, the
+        // actual hand-placed footprint.
+        WorldExploration.MarkExplored(StartingVillageArea);
+        BuildExplorationTimer();
+        BuildRiverFishTimer();
     }
 
-    // Sizes and centers Camera2D around whatever the world actually
-    // contains, instead of hand-computed position/zoom constants going
-    // stale every time the layout changes — every world object with
-    // IHasVisualBounds contributes to the union, and this fits it with
-    // margin, accounting for the log panel's footprint at the bottom.
-    private void FitCameraToWorld()
+    // "Fish that appear and reappear at random spots in the river every
+    // few minutes" — periodically teleports each of _riverFishingSpots
+    // to a fresh random point along the (now much longer) river and
+    // refills it, rather than each just sitting in its one starting
+    // spot for the whole session. A child of _worldLayer for the same
+    // pause-safety reason as BuildExplorationTimer's own timer.
+    private const float RiverFishRelocateSeconds = 150f; // "every few minutes"
+
+    private void BuildRiverFishTimer()
     {
-        Rect2? bounds = null;
-        foreach (Node2D node in _decor)
+        var timer = new Timer { WaitTime = RiverFishRelocateSeconds, Autostart = true };
+        _worldLayer.AddChild(timer);
+        timer.Timeout += RelocateRiverFish;
+    }
+
+    private void RelocateRiverFish()
+    {
+        // Keeps clear of the river's own two ends (a fish spot exactly
+        // at x=±Length/2 would sit right at the bank's tapered tip).
+        float margin = 80f;
+        float half = _river.Length / 2f - margin;
+        foreach (FishingSpot spot in _riverFishingSpots)
         {
-            if (node is not IHasVisualBounds hasBounds)
-                continue;
-            Rect2 local = hasBounds.GetLocalBounds();
-            var worldRect = new Rect2(local.Position + node.Position, local.Size);
-            bounds = bounds.HasValue ? bounds.Value.Merge(worldRect) : worldRect;
+            float worldX = _river.Position.X + Dice.FloatRange(-half, half);
+            spot.Position = new Vector2(worldX, _river.GetCenterlineWorldY(worldX));
+            spot.Refill(3);
         }
-        if (!bounds.HasValue)
-            return;
+        Log("[world] the fish have moved on — new spots have turned up along the river.", "9fc98a");
+    }
 
-        Rect2 b = bounds.Value;
-        Vector2 viewportSize = GetViewportRect().Size;
-        float availableHeight = Mathf.Max(viewportSize.Y - UiPanelHeight, 1f);
+    // The actual footprint of everything hand-placed in BuildWorld()
+    // above (village + frontier: mountains/forest/foothills/river-
+    // crossing sit roughly x 350-1000, y -530..-340) with real margin
+    // beyond both — this is what GroundArea used to be before it became
+    // WorldExploration.MaxMapBounds (see GroundArea's own comment).
+    // Exists purely to seed WorldExploration.MarkExplored() at boot;
+    // nothing else needs "just the curated starting area" as its own rect.
+    private static readonly Rect2 StartingVillageArea = new(-400, -600, 2000, 1500);
 
-        float zoomX = (b.Size.X * CameraMargin) / viewportSize.X;
-        float zoomY = (b.Size.Y * CameraMargin) / availableHeight;
-        float zoom = Mathf.Max(Mathf.Max(zoomX, zoomY), 0.3f);
+    // How far ahead of a character content needs to generate to stay
+    // offscreen until it's actually approached — derived from the same
+    // numbers AttachFollowCamera() sets up, not guessed: at FollowZoom
+    // the camera shows roughly (viewport / zoom) world-units, so half
+    // the viewport's diagonal is the farthest the player could possibly
+    // already be looking. viewport is 1150x880 (project.godot) at zoom
+    // 1.6 -> half-width 359, half-height 275, diagonal half ~452. Comes
+    // out well under this on purpose — "expand" stretch (project.godot)
+    // can show MORE than the design viewport on a wider/taller window,
+    // and there's real travel distance to cover between exploration
+    // ticks too (see BuildExplorationTimer's WaitTime) — so this is
+    // that ~452 plus a generous margin for both, not the bare number.
+    private const float LookaheadRadius = 1000f;
 
-        var camera = GetNode<Camera2D>("Camera2D");
-        camera.Zoom = new Vector2(zoom, zoom);
+    // Checks, on a slow tick rather than every physics frame (region-
+    // scale exploration doesn't need per-frame resolution), whether any
+    // character — NPC or player — has gotten within LookaheadRadius of
+    // a region nobody's been near before, and generates a little more
+    // world there if so — well before it's actually reachable on
+    // screen, not the moment someone steps into it (see
+    // WorldExploration.DiscoverAhead for why that distinction matters).
+    // A child of _worldLayer specifically so it inherits that layer's
+    // Pausable override and stops ticking along with everything else
+    // while the game is paused, rather than Main's own Always mode.
+    private void BuildExplorationTimer()
+    {
+        var timer = new Timer { WaitTime = 2.0, Autostart = true };
+        _worldLayer.AddChild(timer);
+        timer.Timeout += CheckExploration;
+    }
 
-        // Bias the vertical center upward so content centers in the
-        // AVAILABLE (non-UI-covered) part of the screen, not the full
-        // viewport — otherwise content centered in the full viewport
-        // would have its bottom edge sit behind the log panel.
-        Vector2 contentCenter = b.Position + b.Size / 2f;
-        camera.Position = new Vector2(contentCenter.X, contentCenter.Y + (UiPanelHeight / 2f) * zoom);
+    private void CheckExploration()
+    {
+        // ToArray(): GenerateContentAt() can append to _agents indirectly
+        // in principle (it doesn't today, but iterating a defensive copy
+        // costs nothing here and avoids a foreach-over-a-list-you're-
+        // mutating bug being possible at all as this grows later).
+        foreach (IWorldCharacter agent in _agents.ToArray())
+            foreach (Vector2 newRegionCenter in WorldExploration.DiscoverAhead(agent.GlobalPosition, LookaheadRadius))
+                GenerateContentAt(newRegionCenter);
+    }
+
+    // What actually appears in a newly-discovered region — reuses the
+    // exact same classes the hand-placed village already uses (AppleTree,
+    // FishingSpot, Foothills, RiverCrossing) rather than inventing new
+    // procedural art/shapes, so generated content looks and behaves
+    // identically to curated content. Most regions stay empty (roll >
+    // RiverChance below) — the original village isn't densely packed
+    // either, and empty space between landmarks is what makes exploring
+    // toward one feel like going somewhere.
+    private void GenerateContentAt(Vector2 regionCenter)
+    {
+        // Small jitter so generated content doesn't land exactly on a
+        // grid of region centers — reads as organic instead of a lattice.
+        float jitterRange = WorldExploration.RegionSize * 0.3f;
+        Vector2 pos = regionCenter + new Vector2(Dice.FloatRange(-jitterRange, jitterRange), Dice.FloatRange(-jitterRange, jitterRange));
+
+        int roll = Dice.Roll(100); // 1-100
+        if (roll <= 15) GenerateTree(pos);
+        else if (roll <= 23) GeneratePine(pos);
+        else if (roll <= 31) GenerateOak(pos);
+        else if (roll <= 36) GenerateBareTree(pos);
+        else if (roll <= 46) GenerateFishingSpot(pos);
+        else if (roll <= 58) GenerateBerryBush(pos);
+        else if (roll <= 63) GeneratePlainBush(pos);
+        else if (roll <= 78) GenerateMountainPatch(pos);
+        else if (roll <= 91) GenerateRiverPatch(pos);
+
+        // A generated tree/fishing spot is a new obstacle and a new
+        // resource id every NpcAgent needs to see — cheap enough (a
+        // ~1500-cell grid, only on the rare tick something actually
+        // generated) to just rebuild in full rather than patching
+        // PathGrid incrementally.
+        BuildPathGrid();
+    }
+
+    private void GenerateTree(Vector2 pos)
+    {
+        int i = _trees.Count;
+        var tree = new AppleTree { Name = $"Tree{i}", Position = pos, AppleCount = 3 };
+        _worldLayer.AddChild(tree);
+        World().Register($"tree_{i}", tree);
+        _trees.Add(tree);
+        _decor.Add(tree);
+        _world.ContentVersion++;
+        Log($"[world] a new apple tree has grown near ({pos.X:0}, {pos.Y:0}).", "9fc98a");
+    }
+
+    private void GenerateFishingSpot(Vector2 pos)
+    {
+        int i = _fishingSpots.Count;
+        var spot = new FishingSpot { Name = $"FishingSpot{i}", Position = pos, FishCount = 3 };
+        _worldLayer.AddChild(spot);
+        World().Register($"fish_{i}", spot);
+        _fishingSpots.Add(spot);
+        _decor.Add(spot);
+        _world.ContentVersion++;
+        Log($"[world] a new fishing spot has been found near ({pos.X:0}, {pos.Y:0}).", "9fc98a");
+    }
+
+    private void GeneratePine(Vector2 pos)
+    {
+        int i = _pineTrees.Count;
+        var pine = new GatherableFoliage
+        {
+            Name = $"Pine{i}", Position = pos, Count = 3,
+            ActionId = "gather_pinecone", ItemName = "pinecone",
+            TexturePath = "res://assets/world/pine.png", SpriteScale = 4.5f, TrunkRadius = 12f,
+        };
+        _worldLayer.AddChild(pine);
+        World().Register($"pine_{i}", pine);
+        _pineTrees.Add(pine);
+        _decor.Add(pine);
+        _world.ContentVersion++;
+        Log($"[world] a pine tree has taken root near ({pos.X:0}, {pos.Y:0}).", "9fc98a");
+    }
+
+    private static readonly (string Item, Color Tint)[] BerryKinds =
+    {
+        ("blueberry", new Color(0.5f, 0.9f, 2.0f)),
+        ("blackberry", new Color(0.55f, 0.75f, 1.5f)),
+        ("raspberry", new Color(1.2f, 0.6f, 0.6f)),
+    };
+
+    private void GenerateBerryBush(Vector2 pos)
+    {
+        (string item, Color tint) = BerryKinds[Dice.Roll(BerryKinds.Length) - 1];
+        int i = _berryBushes.Count;
+        var bush = new GatherableFoliage
+        {
+            Name = $"Berry{i}", Position = pos, Count = 3,
+            ActionId = "gather_berry", ItemName = item,
+            TexturePath = "res://assets/world/bush_berry.png", SpriteScale = 2.5f, TrunkRadius = 8f,
+            Tint = tint,
+        };
+        _worldLayer.AddChild(bush);
+        World().Register($"berry_{i}", bush);
+        _berryBushes.Add(bush);
+        _decor.Add(bush);
+        _world.ContentVersion++;
+        Log($"[world] a {item} bush has grown near ({pos.X:0}, {pos.Y:0}).", "9fc98a");
+    }
+
+    // Standalone foliage — oak, the bare/dead tree, a plain bush —
+    // never registered (nothing ever looks one up by id, same as
+    // Foothills/ForestPatch aren't either) and never bumps
+    // ContentVersion (they're not in any NpcAgent-cached target list).
+    // Y-sorted in _worldLayer like every other object with real visual
+    // height, unlike the flat backdrop pieces below.
+    private void GenerateOak(Vector2 pos)
+    {
+        var oak = new DecorativeFoliage { Name = $"Oak{_decor.Count}", Position = pos, TexturePath = "res://assets/world/oak.png", SpriteScale = 4.5f, TrunkRadius = 12f };
+        _worldLayer.AddChild(oak);
+        _decor.Add(oak);
+        Log($"[world] an oak tree has grown near ({pos.X:0}, {pos.Y:0}).", "9fc98a");
+    }
+
+    private void GenerateBareTree(Vector2 pos)
+    {
+        var tree = new DecorativeFoliage { Name = $"BareTree{_decor.Count}", Position = pos, TexturePath = "res://assets/world/bare_tree.png", SpriteScale = 4.5f, TrunkRadius = 10f };
+        _worldLayer.AddChild(tree);
+        _decor.Add(tree);
+        Log($"[world] a bare, leafless tree stands near ({pos.X:0}, {pos.Y:0}).", "9fc98a");
+    }
+
+    private void GeneratePlainBush(Vector2 pos)
+    {
+        var bush = new DecorativeFoliage { Name = $"PlainBush{_decor.Count}", Position = pos, TexturePath = "res://assets/world/bush_plain.png", SpriteScale = 2.5f, TrunkRadius = 8f };
+        _worldLayer.AddChild(bush);
+        _decor.Add(bush);
+        Log($"[world] a bush has grown near ({pos.X:0}, {pos.Y:0}).", "9fc98a");
+    }
+
+    // Decorative and solid, like the hand-placed Foothills — but NOT
+    // registered as a flagpole/travel destination. Keeping generated
+    // mountains purely backdrop avoids the travel tool's target list
+    // growing without bound right alongside the map; misty_mountains
+    // stays the one named "far-off landmark" NPCs can reason about.
+    private void GenerateMountainPatch(Vector2 pos)
+    {
+        var patch = new Foothills { Name = $"GeneratedFoothills{_decor.Count}", Position = pos };
+        AddBackgroundNode(patch);
+        _decor.Add(patch);
+        Log($"[world] new foothills have come into view near ({pos.X:0}, {pos.Y:0}).", "9fc98a");
+    }
+
+    // A localized water band (RiverCrossing, not the village's wavy
+    // River ribbon — replicating that procedurally would risk landing
+    // badly without being able to render and check it) — decorative
+    // and solid, same "always behind, never Y-sorted" terrain
+    // treatment as every other background piece.
+    private void GenerateRiverPatch(Vector2 pos)
+    {
+        var patch = new RiverCrossing { Name = $"GeneratedRiver{_decor.Count}", Position = pos };
+        AddBackgroundNode(patch);
+        _decor.Add(patch);
+        Log($"[world] the sound of running water carries from near ({pos.X:0}, {pos.Y:0}).", "9fc98a");
+    }
+
+    // Adds a Main-level child and forces it BEFORE _worldLayer in
+    // sibling order, regardless of when it's added — the same "always
+    // behind" placement BuildWorld() gets for free by construction
+    // (added before _worldLayer exists at all), but generated content
+    // arrives long after _worldLayer already exists, so plain AddChild()
+    // would make it a LATER sibling and render it ON TOP of everything
+    // Y-sorted — the exact bug fixed once already for the hand-placed
+    // river/mountains (see _worldLayer's own comment).
+    private void AddBackgroundNode(Node2D node)
+    {
+        AddChild(node);
+        MoveChild(node, _worldLayer.GetIndex());
     }
 
     // Covers the resource area (home, trees, river) with real margin
@@ -263,17 +702,36 @@ public partial class Main : Node2D
     // "travel" never using the grid regardless.
     private static readonly Rect2 PathGridArea = new(-50, -50, 1250, 850);
 
-    // One tiled grass Sprite2D covering the same area PathGridArea does
-    // (same "resource area, not the frontier" reasoning as its comment
-    // above) — a single node, not a grid of hundreds of small ones:
-    // Sprite2D's RegionRect, given a region LARGER than the source
-    // texture plus TextureRepeat.Enabled, samples the 16×16 tile
-    // repeatedly to fill it, and Scale then blows the whole thing up
-    // uniformly so each repeat reads at GroundTileWorldSize on screen
-    // instead of the source's native 16px. Added first, before anything
-    // else in BuildWorld(), so every other object's default sibling draw
-    // order puts it on top — this is the only thing in the scene that
-    // actually needs to be "the floor."
+    // Deliberately NOT the same rect as PathGridArea — this first pass
+    // covered only the resource area (matching PathGridArea's own
+    // deliberate village-only scope), and with the camera now following
+    // the player around instead of holding a fixed full-map framing, the
+    // player can easily walk to where that rect's edge was and see the
+    // raw background clear color start abruptly. PathGridArea itself is
+    // untouched; widening it too would grow the A* grid for no reason
+    // since "travel" toward the frontier never uses it anyway.
+    //
+    // Same WorldExploration.MaxMapBounds rect that bounds exploration-
+    // driven generation, not an independent guess — grass is a single
+    // cheap repeating Sprite2D regardless of how big a rect it covers
+    // (RegionRect + TextureRepeat tiles at render time, one draw call),
+    // so there's no reason to grow it incrementally as new regions get
+    // discovered the way trees/mountains/rivers do. Painting the whole
+    // max playable area up front means the ground can never fall behind
+    // exploration and re-expose the old "grass stops abruptly" bug —
+    // and tying it to the SAME constant WorldExploration uses means the
+    // two can't drift out of sync if that bound ever changes.
+    private static readonly Rect2 GroundArea = WorldExploration.MaxMapBounds;
+
+    // One tiled grass Sprite2D covering GroundArea — a single node, not
+    // a grid of hundreds of small ones: Sprite2D's RegionRect, given a
+    // region LARGER than the source texture plus TextureRepeat.Enabled,
+    // samples the 16×16 tile repeatedly to fill it, and Scale then blows
+    // the whole thing up uniformly so each repeat reads at
+    // GroundTileWorldSize on screen instead of the source's native 16px.
+    // Added first, before anything else in BuildWorld(), so every other
+    // object's default sibling draw order puts it on top — this is the
+    // only thing in the scene that actually needs to be "the floor."
     private const float GroundTileWorldSize = 32f;
 
     private void BuildGround()
@@ -284,14 +742,35 @@ public partial class Main : Node2D
             Name = "Ground",
             Texture = GD.Load<Texture2D>("res://assets/world/grass.png"),
             Centered = false,
-            Position = PathGridArea.Position,
+            Position = GroundArea.Position,
             RegionEnabled = true,
-            RegionRect = new Rect2(0, 0, PathGridArea.Size.X / s, PathGridArea.Size.Y / s),
+            RegionRect = new Rect2(0, 0, GroundArea.Size.X / s, GroundArea.Size.Y / s),
             Scale = new Vector2(s, s),
             TextureFilter = CanvasItem.TextureFilterEnum.Nearest,
             TextureRepeat = CanvasItem.TextureRepeatEnum.Enabled,
         };
         AddChild(ground);
+    }
+
+    // Dims the ENTIRE 2D world uniformly by multiplying every pixel's
+    // color by DimColor — CanvasModulate only affects whatever canvas it
+    // shares, which is the main 2D scene (Home, trees, characters,
+    // ground) and NOT the UI (that's its own separate CanvasLayer,
+    // untouched by this on purpose — the log panel and action buttons
+    // shouldn't dim along with the world). This darkens everything to a
+    // flat baseline; it does NOT make unlit areas black or hide them —
+    // Godot's 2D lights (PointLight2D, see PlayerCharacter's
+    // BuildVisibilityLight()) work ADDITIVELY on top of this, brightening
+    // their covered radius back up rather than the other way around
+    // (there's no "invisible until lit" occlusion here — that's the
+    // actual fog-of-war step, deliberately not this one). Same
+    // primitive this'll build on for night-time later: a lower DimColor
+    // after dark, wider/dimmer lights near a light source.
+    private static readonly Color DimColor = new(0.55f, 0.55f, 0.62f, 1f);
+
+    private void BuildLighting()
+    {
+        AddChild(new CanvasModulate { Name = "WorldDimmer", Color = DimColor });
     }
 
     private void BuildPathGrid()
@@ -307,15 +786,99 @@ public partial class Main : Node2D
 
     private WorldRegistry World() => GetNode<WorldRegistry>("/root/World");
 
+    // Space, not an Input Map action — same reasoning as the player's
+    // WASD/number-key handling (see PlayerCharacter): avoids hand-
+    // editing project.godot's [input] section. Used to be "P"; moved to
+    // Space once Space stopped meaning "activate the topmost action"
+    // there (number keys 1-9 cover that now, more precisely — which
+    // action, not just whichever's on top) — freed up the single most
+    // reachable key on the board for the single most reached-for
+    // shortcut. Lives on Main, not PlayerCharacter, deliberately —
+    // PlayerCharacter sits under _worldLayer, which is exactly what
+    // needs to STOP receiving input while paused; putting the toggle
+    // there would mean Space could pause the game but never unpause it.
+    // Main.ProcessMode is Always (see _Ready()) specifically so this
+    // keeps firing regardless of pause state, in both directions.
+    public override void _UnhandledKeyInput(InputEvent @event)
+    {
+        if (@event is InputEventKey { Pressed: true, Echo: false, Keycode: Key.Space })
+        {
+            TogglePause();
+            GetViewport().SetInputAsHandled();
+        }
+    }
+
+    private void TogglePause()
+    {
+        bool paused = !GetTree().Paused;
+        GetTree().Paused = paused;
+        GetNode<Button>("UI/PauseButton").Text = paused ? "Resume" : "Pause";
+    }
+
+    // AppendText(), not a full Text replace of a rebuilt _logLines join —
+    // DebugLog's scroll_follow=true (Main.tscn) is Godot's own "only
+    // autoscroll if the user was already at the bottom, leave it alone
+    // if they scrolled up to read" behavior, but it's built around
+    // incremental content growth. Replacing the ENTIRE Text every single
+    // line defeated it — from RichTextLabel's perspective that's a new
+    // block of content each time, not "content added to what's already
+    // there," so it had no reliable "was I at the bottom" state to act
+    // on. RemoveParagraph(0) trims old lines the same way _logLines used
+    // to (each Log() call is one paragraph), without ever touching Text
+    // as a whole.
+    private const int MaxLogLines = 40;
+
+    // Explicit, not scroll_follow (Main.tscn had that on originally,
+    // now off) — scroll_follow's own "was I already at the bottom"
+    // heuristic is built around plain content GROWTH, and every Log()
+    // call here does an AppendText immediately followed by a
+    // RemoveParagraph(0) trim in the same tick once the log's past
+    // MaxLogLines. That compound add-then-trim is what actually caused
+    // "sometimes auto-scrolls, sometimes doesn't" — verified headlessly
+    // that scroll_follow's own bottom-tracking silently fails to keep
+    // up across that pattern. Doing the check and the scroll ourselves
+    // removes the guesswork: read the scrollbar BEFORE touching
+    // content, then explicitly scroll to the true bottom AFTER, in the
+    // same call — verified headlessly this needs no extra frame to
+    // "settle" first (an earlier version deferred this a frame on the
+    // theory that Godot's layout wouldn't have caught up yet by the
+    // time MaxValue/GetLineCount() were read; that theory turned out
+    // wrong AND the deferral introduced its own real bug: a
+    // CallDeferred scheduled during Main's own _Ready() — i.e. every
+    // boot-time spawn line — never actually fired, leaving the log
+    // sitting unscrolled at the top until something else nudged it
+    // later. Calling ScrollToLine() immediately, synchronously, fixed
+    // both).
     private void Log(string line, string color = "d8ddd0")
     {
         // escape literal brackets so LLM text can never be read as a bbcode tag
         string safe = line.Replace("[", "[lb]");
         if (safe.Length > 200)
             safe = safe.Substring(0, 197) + "...";
-        _logLines.Add($"[color=#{color}]{safe}[/color]");
-        if (_logLines.Count > 40)
-            _logLines.RemoveAt(0);
-        _debugLog.Text = string.Join("\n", _logLines);
+
+        VScrollBar scrollBar = _debugLog.GetVScrollBar();
+        // page is how much content is already visible — "at the bottom"
+        // means the visible page's far edge already reaches MaxValue,
+        // not that Value itself equals MaxValue (page > 0 whenever
+        // there's more content than fits). The 1px slack absorbs float
+        // rounding, same reasoning as any other "close enough" scroll
+        // check. No scrollbar yet (nothing's overflowed the box) counts
+        // as "at the bottom" too — there's nowhere else it could be.
+        bool wasAtBottom = scrollBar == null || scrollBar.Value >= scrollBar.MaxValue - scrollBar.Page - 1.0;
+
+        _debugLog.AppendText($"[color=#{color}]{safe}[/color]\n");
+        while (_debugLog.GetParagraphCount() > MaxLogLines)
+            _debugLog.RemoveParagraph(0);
+
+        // ScrollToLine(), not scrollBar.Value = scrollBar.MaxValue —
+        // tried that first and verified headlessly that setting Value
+        // directly is silently ineffective (reads back as if nothing
+        // happened; GetVScrollBar() appears to hand back a read-only
+        // reflection of RichTextLabel's own internal scroll state, not
+        // something that drives it). ScrollToLine() is RichTextLabel's
+        // own real API for this and verified to land exactly at the
+        // true bottom (max_value - page, not just approximately).
+        if (wasAtBottom)
+            _debugLog.ScrollToLine(_debugLog.GetLineCount());
     }
 }

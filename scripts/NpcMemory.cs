@@ -24,7 +24,11 @@ public class NpcMemory
 
     public string Diary { get; private set; } = "";
 
-    /// kind: "location" | "thought" | "action" | "conversation"
+    /// kind is a free-form tag, not a restricted enum — Render() below
+    /// includes every entry regardless of kind, so callers just pick
+    /// whatever short word actually describes the entry (in use as of
+    /// this writing: location, thought, action, speech, heard,
+    /// witnessed, inventory, discovery, steal, trade, emotion).
     public void Record(string kind, string text)
     {
         _turn++;

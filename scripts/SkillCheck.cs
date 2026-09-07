@@ -1,6 +1,6 @@
 // One shared d20-plus-modifier-vs-DC roll, used everywhere a character's
 // stats should have a say in whether an action actually works — gathering,
-// stealing, persuading, and anything added after. Centralizing this is
+// stealing, and anything added after. Centralizing this is
 // what makes "log the roll" consistent everywhere instead of every call
 // site hand-rolling its own dictionary of numbers.
 public readonly struct SkillCheck

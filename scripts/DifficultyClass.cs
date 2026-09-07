@@ -9,10 +9,9 @@ public static class DifficultyClass
     // very low-Dexterity character can still fumble occasionally.
     public const int Gather = 5;
 
-    // Stealing and persuading are real contests: the flat number here
-    // is added to the TARGET's own relevant modifier at the call site,
-    // so a more dexterous target is genuinely harder to steal from, and
-    // a more charismatic (harder to sway) target is genuinely harder to
-    // persuade — not just a fixed number everyone faces equally.
+    // Stealing is a real contest: the flat number here is added to the
+    // TARGET's own relevant modifier at the call site, so a more
+    // dexterous target is genuinely harder to steal from — not just a
+    // fixed number everyone faces equally.
     public const int OpposedBase = 10;
 }

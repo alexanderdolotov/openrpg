@@ -9,6 +9,17 @@ public class WorldContext
 {
     public List<AppleTree> Trees;
     public List<FishingSpot> FishingSpots;
+
+    // Both GatherableFoliage — pine yields "pinecone", the berry bushes
+    // yield "blueberry"/"blackberry"/"raspberry" (same class, different
+    // [Export] config — see GatherableFoliage's own header). Two
+    // separate lists, not one, because each is its own action's
+    // target-id enum (gather_pinecone vs gather_berry — see Mind.cs) —
+    // scoping "which targets are valid for THIS action" is the whole
+    // reason TreeIds()/FishingSpotIds() are separate lists too.
+    public List<GatherableFoliage> PineTrees;
+    public List<GatherableFoliage> BerryBushes;
+
     public Home Home;
 
     // Distant, non-resource landmarks an NPC can only reach by walking
@@ -27,4 +38,42 @@ public class WorldContext
     // an LLM-driven NPC and the input-driven PlayerCharacter are
     // indistinguishable from here.
     public List<IWorldCharacter> Agents = new();
+
+    // Bumped by Main whenever exploration-driven generation (see
+    // WorldExploration) adds a new tree or fishing spot after boot.
+    // NpcAgent's cached TreeIds()/FishingSpotIds() arrays are keyed off
+    // this — a cache built before the world grew would otherwise never
+    // see the new resource for the rest of the run.
+    public int ContentVersion = 0;
+
+    // NpcAgent and PlayerCharacter both end up in Agents but don't
+    // share a common base with a Stats property — NpcAgent holds its
+    // NPCActor by reference (see NpcAgent.Initialize()'s own comment)
+    // while PlayerCharacter directly extends NPCActor. Resolved here,
+    // once, rather than reimplemented by every caller that needs a
+    // character's actual stats (the persuasion-hint roll, the
+    // steal-noticing roll) — lives on WorldContext since it already
+    // owns Agents, the thing this is actually about interpreting.
+    public static NPCActor ActorOf(IWorldCharacter character) => character switch
+    {
+        NpcAgent npc => npc.Actor,
+        NPCActor actor => actor, // covers PlayerCharacter
+        _ => null,
+    };
+
+    // Every character currently in the world, with the Wisdom modifier
+    // WorldEventLog.AnnounceStealthAttempt() rolls against — it filters
+    // by distance/who's-the-thief/who's-the-victim itself, so this just
+    // hands over everyone rather than pre-filtering here too. Shared by
+    // NpcAgent and PlayerCharacter's own steal handling, same reasoning
+    // as ActorOf() above.
+    public IEnumerable<(string Name, Vector2 Position, int WisdomMod)> CharactersWithStats()
+    {
+        foreach (IWorldCharacter c in Agents)
+        {
+            NPCActor actor = ActorOf(c);
+            if (actor != null)
+                yield return (c.DisplayName, c.GlobalPosition, actor.Stats.WisdomMod);
+        }
+    }
 }

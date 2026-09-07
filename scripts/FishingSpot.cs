@@ -21,6 +21,7 @@ public partial class FishingSpot : Node2D, IInteractable, IHasVisualBounds
 
     private static Texture2D _waterTexture;
     private Sprite2D _sprite;
+    private FishIcon _fishIcon;
 
     public override void _Ready()
     {
@@ -33,9 +34,29 @@ public partial class FishingSpot : Node2D, IInteractable, IHasVisualBounds
             Modulate = FishCount > 0 ? Colors.White : DepletedTint,
         };
         AddChild(_sprite);
+
+        // Added AFTER _sprite, not before — sibling order is what puts
+        // it visually on top of the water instead of underneath, same
+        // "always drawn over" trick used everywhere else in this
+        // codebase without needing real Y-sort for flat terrain (see
+        // FishIcon's own header comment). Hidden once depleted, same
+        // signal the water's own grey tint already gives.
+        _fishIcon = new FishIcon { Visible = FishCount > 0 };
+        AddChild(_fishIcon);
     }
 
     public Rect2 GetLocalBounds() => new(-Radius, -Radius, Radius * 2f, Radius * 2f);
+
+    // Undoes depletion in place — used by Main.RelocateRiverFish() when
+    // a river fish spot periodically teleports to a fresh point and
+    // starts over, rather than staying drained forever after its first
+    // visitor empties it out.
+    public void Refill(int count)
+    {
+        FishCount = count;
+        _sprite.Modulate = Colors.White;
+        _fishIcon.Visible = true;
+    }
 
     public InteractResult TryInteract(NPCActor actor, string actionId)
     {
@@ -55,7 +76,10 @@ public partial class FishingSpot : Node2D, IInteractable, IHasVisualBounds
         FishCount--;
         actor.Inventory.Add("fish");
         if (FishCount <= 0)
+        {
             _sprite.Modulate = DepletedTint;
+            _fishIcon.Visible = false;
+        }
         data["fish_left"] = FishCount;
         return new InteractResult(true, "ok", data);
     }

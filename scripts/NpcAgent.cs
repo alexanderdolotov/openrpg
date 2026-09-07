@@ -1,13 +1,15 @@
 using Godot;
 using System;
 using System.Collections.Generic;
+using System.Linq;
 using System.Threading.Tasks;
 
-// Everything one NPC needs to run its own cognition loop, owned
-// together: its actor, its own Mind (with its own ILlmProvider instance
-// — never shared between agents, since a single HttpRequest node can't
-// have two requests in flight at once), its memory, and its
-// personality. Built by NpcFactory, not constructed directly.
+// Everything one NPC needs to run its own cognition loop: a reference to
+// its actor (NOT a scene-tree child of this — see Initialize()), its
+// own Mind (with its own ILlmProvider instance — never shared between
+// agents, since a single HttpRequest node can't have two requests in
+// flight at once), its memory, and its personality. Built by
+// NpcFactory, not constructed directly.
 //
 // Main owns the shared world (WorldContext); an NpcAgent only reads
 // that to build its own perception and fallback — it never mutates
@@ -55,16 +57,27 @@ public partial class NpcAgent : Node, IWorldCharacter
     private string _lastFailureKey = "";
     private int _consecutiveFailures = 0;
 
-    // Baseline for noticing an inventory change caused by someone ELSE
-    // (a trade received, a theft) rather than this NPC's own last
-    // action. Refreshed right after this NPC's own action resolves (see
-    // OnActionCompleted) so that refresh always absorbs the NPC's own
-    // effect first — anything different by the next comparison, at the
-    // top of the following TakeTurn(), can only be someone else's doing.
-    private Dictionary<string, int> _lastKnownInventory = new();
+    // Noticing an inventory change caused by someone ELSE (a trade
+    // received, a theft) rather than this NPC's own last action —
+    // AbsorbOwnChange() runs right after this NPC's own action resolves
+    // (see OnActionCompleted), DetectExternalChanges() at the top of the
+    // following TakeTurn(). See InventoryWatcher itself for why this is
+    // shared with PlayerCharacter rather than each carrying its own copy.
+    private readonly InventoryWatcher _inventoryWatcher = new();
 
     private static readonly Random Rng = new();
     private const float RetryDelaySeconds = 3f;
+
+    // A floor under every action's post-result pause, not just wait's/
+    // sleep's own — previously every OTHER action (pick_apple, speak,
+    // travel, trade, steal, ...) had none at all, so the
+    // instant an action resolved, TakeTurn() ran again immediately. With
+    // 3 NPCs and a fast model, that reads as a wall of thought/speech/
+    // result lines with no time to actually read any of them. Purely a
+    // pacing knob for a human watching the console — raise it for a
+    // more relaxed pace, lower it (toward 0) to go back to "as fast as
+    // the model allows."
+    private const float MinTurnPause = 4f;
 
     // Godot Nodes are constructed parameterless and configured
     // afterward — this plays that role, since an agent needs several
@@ -88,7 +101,14 @@ public partial class NpcAgent : Node, IWorldCharacter
         _uiLog = uiLog;
         _pureLlmMode = pureLlmMode;
 
-        AddChild(Actor);
+        // NOT AddChild(Actor) — the caller (NpcFactory) already added
+        // Actor directly to the world layer itself, as a sibling of this
+        // NpcAgent rather than a child of it. See NpcFactory's own
+        // comment for why: Actor is the only part of this that draws
+        // anything, and it needs to sit at the SAME tree depth
+        // PlayerCharacter does for Y-sort to have one uniform rule to
+        // apply, not "usually direct children, except NPCs, which are
+        // one level deeper."
         AddChild((Node)provider);
         Actor.ActionCompleted += OnActionCompleted;
     }
@@ -119,13 +139,31 @@ public partial class NpcAgent : Node, IWorldCharacter
         // be live.
         foreach ((string speakerName, string message) in SpeechLog.Overheard(Personality.Name, Actor.GlobalPosition))
         {
-            _uiLog($"[{Personality.Name}] heard {speakerName} say: \"{message}\"", "c9a9e8");
-            Memory.Record("heard", $"{speakerName} said: \"{message}\"");
-            _thoughtLog.Log(Personality.Name, "HEARD", $"{speakerName}: {message}");
+            string hint = DescribePersuasionHint(speakerName);
+            _uiLog($"[{Personality.Name}] heard {speakerName} say: \"{message}\"{hint}", "c9a9e8");
+            Memory.Record("heard", $"{speakerName} said: \"{message}\"{hint}");
+            _thoughtLog.Log(Personality.Name, "HEARD", $"{speakerName}: {message}{hint}");
+        }
+
+        // Same "delivered once, written to Memory" treatment as heard
+        // speech just above — whatever else happened nearby since this
+        // NPC's own last turn (someone gathering, giving something
+        // away, arriving somewhere, ...) arrives here as one batch, not
+        // as it happens. That's what keeps this from turning into a
+        // flood of interruptions: nothing here pushes into anyone's
+        // context in real time, it just waits in WorldEventLog until
+        // whichever NPC's turn comes around asks what it missed — see
+        // RecentEventBuffer's own header for the full reasoning.
+        foreach ((string actorName, string description) in WorldEventLog.Witnessed(Personality.Name, Actor.GlobalPosition))
+        {
+            _thoughtLog.Log(Personality.Name, "WITNESSED", description);
+            Memory.Record("witnessed", description);
         }
 
         string perception = BuildPerception();
-        var result = await Mind.Decide(perception, TreeIds(), FishingSpotIds(), TravelTargetIds(), NearbyNpcNames(), CarriedItems(), Personality);
+        bool sleepAllowed = Actor.CanSleep(_world.Home.GlobalPosition);
+        var targets = new Mind.AvailableTargets(TreeIds(), FishingSpotIds(), PineTreeIds(), BerryBushIds(), TravelTargetIds(), NearbyNpcNames(), CarriedItems(), sleepAllowed);
+        var result = await Mind.Decide(perception, targets, Personality);
         _thinking = false;
 
         if (!result.Ok && _pureLlmMode)
@@ -136,7 +174,10 @@ public partial class NpcAgent : Node, IWorldCharacter
             // action seen genuinely came from the model.
             _uiLog($"[{Personality.Name}] mind unreachable ({result.Error}) -> retrying in {RetryDelaySeconds:0}s (fallback disabled)", "e0c66a");
             _thoughtLog.Log(Personality.Name, "FALLBACK_DISABLED", result.Error);
-            await Actor.ToSignal(Actor.GetTree().CreateTimer(RetryDelaySeconds), SceneTreeTimer.SignalName.Timeout);
+            // processAlways:false — this timer (and every other one an
+            // NPC's turn loop waits on) should actually freeze while the
+            // game is paused, not keep ticking down in the background.
+            await Actor.ToSignal(Actor.GetTree().CreateTimer(RetryDelaySeconds, processAlways: false), SceneTreeTimer.SignalName.Timeout);
             await TakeTurn();
             return;
         }
@@ -172,27 +213,84 @@ public partial class NpcAgent : Node, IWorldCharacter
         Actor.AssignAction(action);
     }
 
+    // Flagpoles are set up once in Main.BuildWorld() and never added or
+    // removed afterward, so this id list is the same array, every
+    // single call, for the entire session. Trees and fishing spots
+    // WERE the same story until exploration-driven generation (see
+    // WorldExploration/Main.GenerateContentAt) started adding more of
+    // both as characters wander into new regions — so those two are
+    // keyed off WorldContext.ContentVersion below and rebuild
+    // themselves the first time they're asked for after it changes,
+    // rather than being cached forever. Still real savings over
+    // rebuilding every turn regardless (a handful of allocations x
+    // however many NPCs x every turn, indefinitely) for what's still a
+    // hot, repeating path, unlike NearbyNpcNames()/CarriedItems() below,
+    // which really do change turn to turn and can't be cached this way.
+    private string[] _treeIds;
+    private int _treeIdsVersion = -1;
     private string[] TreeIds()
     {
-        var ids = new string[_world.Trees.Count];
-        for (int i = 0; i < _world.Trees.Count; i++)
-            ids[i] = $"tree_{i}";
-        return ids;
+        if (_treeIds == null || _treeIdsVersion != _world.ContentVersion)
+        {
+            _treeIds = new string[_world.Trees.Count];
+            for (int i = 0; i < _treeIds.Length; i++)
+                _treeIds[i] = $"tree_{i}";
+            _treeIdsVersion = _world.ContentVersion;
+        }
+        return _treeIds;
     }
 
+    private string[] _fishingSpotIds;
+    private int _fishingSpotIdsVersion = -1;
     private string[] FishingSpotIds()
     {
-        var ids = new string[_world.FishingSpots.Count];
-        for (int i = 0; i < _world.FishingSpots.Count; i++)
-            ids[i] = $"fish_{i}";
-        return ids;
+        if (_fishingSpotIds == null || _fishingSpotIdsVersion != _world.ContentVersion)
+        {
+            _fishingSpotIds = new string[_world.FishingSpots.Count];
+            for (int i = 0; i < _fishingSpotIds.Length; i++)
+                _fishingSpotIds[i] = $"fish_{i}";
+            _fishingSpotIdsVersion = _world.ContentVersion;
+        }
+        return _fishingSpotIds;
     }
 
+    private string[] _pineTreeIds;
+    private int _pineTreeIdsVersion = -1;
+    private string[] PineTreeIds()
+    {
+        if (_pineTreeIds == null || _pineTreeIdsVersion != _world.ContentVersion)
+        {
+            _pineTreeIds = new string[_world.PineTrees.Count];
+            for (int i = 0; i < _pineTreeIds.Length; i++)
+                _pineTreeIds[i] = $"pine_{i}";
+            _pineTreeIdsVersion = _world.ContentVersion;
+        }
+        return _pineTreeIds;
+    }
+
+    private string[] _berryBushIds;
+    private int _berryBushIdsVersion = -1;
+    private string[] BerryBushIds()
+    {
+        if (_berryBushIds == null || _berryBushIdsVersion != _world.ContentVersion)
+        {
+            _berryBushIds = new string[_world.BerryBushes.Count];
+            for (int i = 0; i < _berryBushIds.Length; i++)
+                _berryBushIds[i] = $"berry_{i}";
+            _berryBushIdsVersion = _world.ContentVersion;
+        }
+        return _berryBushIds;
+    }
+
+    private string[] _travelTargetIds;
     private string[] TravelTargetIds()
     {
-        var ids = new string[_world.Flagpoles.Count];
-        _world.Flagpoles.Keys.CopyTo(ids, 0);
-        return ids;
+        if (_travelTargetIds == null)
+        {
+            _travelTargetIds = new string[_world.Flagpoles.Count];
+            _world.Flagpoles.Keys.CopyTo(_travelTargetIds, 0);
+        }
+        return _travelTargetIds;
     }
 
     // Names of other NPCs currently within hearing/perception range —
@@ -211,6 +309,37 @@ public partial class NpcAgent : Node, IWorldCharacter
                 names.Add(other.DisplayName);
         }
         return names.ToArray();
+    }
+
+    // Charisma actually mattering mechanically, without a "persuade"
+    // action forcing an outcome — there's deliberately no such action
+    // (see Mind's own header comment for why). Instead, every heard
+    // line gets one opposed roll folded in as plain, qualitative
+    // framing — the same shape of check steal already uses (see
+    // SkillCheck/DifficultyClass.OpposedBase), just never gating
+    // anything itself. This NPC's own Mind still decides, next turn,
+    // whether to actually go along with what it heard — a convincing
+    // roll doesn't force compliance and an unconvincing one doesn't
+    // forbid it, it's just one more honest piece of context alongside
+    // personality, relationship, and everything else already in play.
+    private string DescribePersuasionHint(string speakerName)
+    {
+        int? speakerCharisma = FindCharismaMod(speakerName);
+        if (speakerCharisma == null)
+            return ""; // speaker's gone, or something else looked up their name wrong — say nothing rather than guess
+
+        var check = SkillCheck.Roll(speakerCharisma.Value, DifficultyClass.OpposedBase + Actor.Stats.CharismaMod);
+        return check.Success
+            ? " (this comes across as pretty convincing to you)"
+            : " (this doesn't really land for you — easy to brush off if you're not already inclined to agree)";
+    }
+
+    private int? FindCharismaMod(string displayName)
+    {
+        foreach (IWorldCharacter agent in _world.Agents)
+            if (agent.DisplayName == displayName)
+                return WorldContext.ActorOf(agent)?.Stats.CharismaMod;
+        return null;
     }
 
     // What this NPC actually has on hand right now — the enum for
@@ -238,9 +367,34 @@ public partial class NpcAgent : Node, IWorldCharacter
             yield return ($"tree_{i}", _world.Trees[i].GlobalPosition);
         for (int i = 0; i < _world.FishingSpots.Count; i++)
             yield return ($"fish_{i}", _world.FishingSpots[i].GlobalPosition);
+        for (int i = 0; i < _world.PineTrees.Count; i++)
+            yield return ($"pine_{i}", _world.PineTrees[i].GlobalPosition);
+        for (int i = 0; i < _world.BerryBushes.Count; i++)
+            yield return ($"berry_{i}", _world.BerryBushes[i].GlobalPosition);
         yield return ("home", _world.Home.GlobalPosition);
         foreach (KeyValuePair<string, Node2D> kv in _world.Flagpoles)
             yield return (kv.Key, kv.Value.GlobalPosition);
+    }
+
+    // Shared by BuildPerception() for all four resource types (trees,
+    // fishing spots, pine trees, berry bushes) — same sort-take-
+    // describe shape each needs, just a different id prefix and a
+    // different way to read "how much is left" (AppleTree/FishingSpot/
+    // GatherableFoliage don't share an interface for that, so a lambda
+    // reads it instead of forcing one in just for this).
+    private const int NearbyResourceCount = 6;
+    private void AppendNearestResources<T>(List<string> lines, List<T> items, string idPrefix, System.Func<T, int> remaining, string itemPlural) where T : Node2D
+    {
+        List<(T Item, int Index)> nearest = items
+            .Select((item, i) => (item, i))
+            .OrderBy(pair => Actor.GlobalPosition.DistanceTo(pair.item.GlobalPosition))
+            .Take(NearbyResourceCount)
+            .ToList();
+        foreach ((T item, int i) in nearest)
+        {
+            int dist = (int)Actor.GlobalPosition.DistanceTo(item.GlobalPosition);
+            lines.Add($"{idPrefix}_{i}: {remaining(item)} {itemPlural} left, {dist} px away");
+        }
     }
 
     private string BuildPerception()
@@ -248,18 +402,23 @@ public partial class NpcAgent : Node, IWorldCharacter
         var lines = new List<string> { Personality.DescribeForPrompt() };
         if (_lastResultLine != "")
             lines.Add(_lastResultLine);
-        for (int i = 0; i < _world.Trees.Count; i++)
-        {
-            AppleTree t = _world.Trees[i];
-            int dist = (int)Actor.GlobalPosition.DistanceTo(t.GlobalPosition);
-            lines.Add($"tree_{i}: {t.AppleCount} apples left, {dist} px away");
-        }
-        for (int i = 0; i < _world.FishingSpots.Count; i++)
-        {
-            FishingSpot f = _world.FishingSpots[i];
-            int dist = (int)Actor.GlobalPosition.DistanceTo(f.GlobalPosition);
-            lines.Add($"fish_{i}: {f.FishCount} fish left, {dist} px away");
-        }
+
+        // Nearest-N, not "every one that exists" — fine when the world
+        // was a fixed 3 trees + 2 fishing spots, but exploration-driven
+        // generation (see WorldExploration) can grow any of these lists
+        // indefinitely (up to WorldExploration.MaxMapBounds) as
+        // characters wander. Capping to what's actually close keeps the
+        // prompt bounded regardless of how much of the map has been
+        // uncovered, and "what's nearby" is what a decision about
+        // gathering actually needs anyway — a tree three regions away
+        // isn't a real option this turn. One shared helper (below) for
+        // all four resource lists rather than four copies of the same
+        // sort-take-describe dance.
+        AppendNearestResources(lines, _world.Trees, "tree", t => t.AppleCount, "apples");
+        AppendNearestResources(lines, _world.FishingSpots, "fish", f => f.FishCount, "fish");
+        AppendNearestResources(lines, _world.PineTrees, "pine", p => p.Count, "pinecones");
+        AppendNearestResources(lines, _world.BerryBushes, "berry", b => b.Count, "berries");
+
         int homeDist = (int)Actor.GlobalPosition.DistanceTo(_world.Home.GlobalPosition);
         lines.Add($"home: {homeDist} px away, {_world.Home.ApplesStored} apples and {_world.Home.FishStored} fish stored there so far");
 
@@ -319,6 +478,16 @@ public partial class NpcAgent : Node, IWorldCharacter
             float d = Actor.GlobalPosition.DistanceTo(_world.FishingSpots[i].GlobalPosition);
             if (d < bestDist) { bestDist = d; nearest = $"fish_{i}"; }
         }
+        for (int i = 0; i < _world.PineTrees.Count; i++)
+        {
+            float d = Actor.GlobalPosition.DistanceTo(_world.PineTrees[i].GlobalPosition);
+            if (d < bestDist) { bestDist = d; nearest = $"pine_{i}"; }
+        }
+        for (int i = 0; i < _world.BerryBushes.Count; i++)
+        {
+            float d = Actor.GlobalPosition.DistanceTo(_world.BerryBushes[i].GlobalPosition);
+            if (d < bestDist) { bestDist = d; nearest = $"berry_{i}"; }
+        }
         foreach (KeyValuePair<string, Node2D> kv in _world.Flagpoles)
         {
             float d = Actor.GlobalPosition.DistanceTo(kv.Value.GlobalPosition);
@@ -354,6 +523,12 @@ public partial class NpcAgent : Node, IWorldCharacter
         for (int i = 0; i < _world.FishingSpots.Count; i++)
             if (_world.FishingSpots[i].FishCount > 0)
                 options.Add(new GameAction("catch_fish", $"fish_{i}", ActionRanges.CatchFish));
+        for (int i = 0; i < _world.PineTrees.Count; i++)
+            if (_world.PineTrees[i].Count > 0)
+                options.Add(new GameAction("gather_pinecone", $"pine_{i}", ActionRanges.GatherPinecone));
+        for (int i = 0; i < _world.BerryBushes.Count; i++)
+            if (_world.BerryBushes[i].Count > 0)
+                options.Add(new GameAction("gather_berry", $"berry_{i}", ActionRanges.GatherBerry));
 
         if (options.Count == 0)
             return new GameAction("wait", "", 0f);
@@ -361,14 +536,14 @@ public partial class NpcAgent : Node, IWorldCharacter
         return options[Rng.Next(options.Count)];
     }
 
-    // Reasons that mean "bad luck," not "wrong choice" — a fumbled gather,
-    // a failed steal, an unconvincing persuade attempt are all real dice
-    // rolls that could go the other way next time on the exact same
-    // target. Conflating these with a structural block (depleted,
+    // Reasons that mean "bad luck," not "wrong choice" — a fumbled gather
+    // or a failed steal are real dice rolls that could go the other way
+    // next time on the exact same target. Conflating these with a
+    // structural block (depleted,
     // hands full, target gone — where repeating really is pointless
     // until something changes) was actively steering NPCs away from a
     // perfectly good tree after two unlucky rolls in a row.
-    private static readonly HashSet<string> ChanceBasedReasons = new() { "fumbled", "steal_failed", "unconvincing" };
+    private static readonly HashSet<string> ChanceBasedReasons = new() { "fumbled", "steal_failed" };
 
     // Tracks whether the SAME action+target+reason just failed again, and
     // escalates the message accordingly — the log showed a small model
@@ -411,42 +586,52 @@ public partial class NpcAgent : Node, IWorldCharacter
             Memory.Record("action", $"REPEATED FAILURE: {what} has now failed {_consecutiveFailures} times in a row ({reason}).");
     }
 
-    // Compares current inventory against the baseline taken right after
-    // this NPC's own last action resolved — since nothing else can
-    // legally change an inventory except this NPC's own actions
-    // (already accounted for in that baseline) or someone else's
-    // trade/steal reaching them, any difference found here can only be
-    // the latter. This is the whole mechanism behind "wonder if an item
-    // was lost or stolen": no flag anywhere says "you were robbed" —
-    // the NPC just notices its own count doesn't match what it
-    // remembers and has to decide what that means, same as a person
-    // patting their pockets.
+    // See InventoryWatcher for the actual comparison; this just decides
+    // what an NPC specifically does with each note it returns. A loss
+    // gets a console line too (worth a human watching noticing); a gain
+    // only goes to Memory/the thought log — the NPC itself still reasons
+    // about it, it just doesn't print as its own event. Distinguishing
+    // the two from the note text ("missing" vs "more") is a little
+    // fragile, but confined to this one call site rather than something
+    // the shared class needs to know about NpcAgent's specific logging.
     private void NoticeInventoryChanges()
     {
-        foreach (KeyValuePair<string, int> before in _lastKnownInventory)
+        foreach (string note in _inventoryWatcher.DetectExternalChanges(Actor.Inventory))
         {
-            int after = Actor.Inventory.Count(before.Key);
-            if (after < before.Value)
-            {
-                int missing = before.Value - after;
-                string note = $"You notice you're missing {missing} {before.Key}{(missing != 1 ? "s" : "")} you had before — you didn't deposit, give, or trade it away yourself, so it must have been taken or lost.";
+            bool isLoss = note.Contains("missing");
+            if (isLoss)
                 _uiLog($"[{Personality.Name}] {note}", "e0876b");
-                Memory.Record("inventory", note);
-                _thoughtLog.Log(Personality.Name, "INVENTORY_LOSS_NOTICED", note);
-            }
+            Memory.Record("inventory", note);
+            _thoughtLog.Log(Personality.Name, isLoss ? "INVENTORY_LOSS_NOTICED" : "INVENTORY_GAIN_NOTICED", note);
         }
-        foreach (KeyValuePair<string, int> after in Actor.Inventory.All)
+    }
+
+    // Feeds WorldEventLog so nearby characters can notice this NPC's
+    // own non-secret, non-speech actions on their own next turn — see
+    // RecentEventBuffer's header for why batching it this way is what
+    // keeps this from turning into a flood. Only called for actions
+    // OTHER than trade/steal (see OnActionCompleted below) — trade
+    // announces itself right where its "given_to" detail already lives,
+    // and steal deliberately never goes through here at all (see
+    // AnnounceStealthAttempt instead). wait and speak fall through to
+    // the default on purpose: doing nothing isn't a notable event, and
+    // speech already has its own, audible channel (SpeechLog).
+    private void AnnounceVisibleAction(string actionId, string targetId, Godot.Collections.Dictionary data)
+    {
+        string description = actionId switch
         {
-            int before = _lastKnownInventory.TryGetValue(after.Key, out int b) ? b : 0;
-            if (after.Value > before)
-            {
-                int gained = after.Value - before;
-                string note = $"You notice you now have {gained} more {after.Key}{(gained != 1 ? "s" : "")} than you remember having — someone must have given or traded it to you.";
-                Memory.Record("inventory", note);
-                _thoughtLog.Log(Personality.Name, "INVENTORY_GAIN_NOTICED", note);
-            }
-        }
-        _lastKnownInventory = Actor.Inventory.Snapshot();
+            "pick_apple" => $"{Personality.Name} picks an apple from a tree.",
+            "catch_fish" => $"{Personality.Name} catches a fish.",
+            "gather_pinecone" => $"{Personality.Name} gathers a pinecone from a pine tree.",
+            "gather_berry" => $"{Personality.Name} picks a berry from a bush.",
+            "deposit" => $"{Personality.Name} deposits their haul at home.",
+            "travel" => $"{Personality.Name} arrives at {targetId}.",
+            "follow" => $"{Personality.Name} walks up alongside {targetId}.",
+            "sleep" => $"{Personality.Name} was asleep nearby for a while.",
+            _ => null,
+        };
+        if (description != null)
+            WorldEventLog.Announce(Personality.Name, Actor.GlobalPosition, description);
     }
 
     private async void OnActionCompleted(Godot.Collections.Dictionary result)
@@ -466,6 +651,7 @@ public partial class NpcAgent : Node, IWorldCharacter
         if (success && actionId == "speak")
         {
             SpeechLog.Say(Personality.Name, Actor.GlobalPosition, message);
+            Actor.ShowSpeechBubble();
             _uiLog($"[{Personality.Name}] says: \"{message}\"", "e8d9a9");
             Memory.Record("speech", $"Said: \"{message}\"");
             _thoughtLog.Log(Personality.Name, "SPEAK", message);
@@ -481,6 +667,10 @@ public partial class NpcAgent : Node, IWorldCharacter
                 _uiLog($"[{Personality.Name}] gives {amount} {item}(s) to {givenTo}", "e8d9a9");
                 Memory.Record("trade", $"Gave {amount} {item}(s) to {givenTo}.");
                 _thoughtLog.Log(Personality.Name, "TRADE", $"gave {amount} {item} to {givenTo}");
+                // A real, public exchange — unlike steal below, nothing
+                // about this is hidden, so it goes through the normal
+                // broadcast every nearby character can see.
+                WorldEventLog.Announce(Personality.Name, Actor.GlobalPosition, $"{Personality.Name} gives {amount} {item}(s) to {givenTo}.");
             }
             else
             {
@@ -493,30 +683,30 @@ public partial class NpcAgent : Node, IWorldCharacter
                 _uiLog($"[{Personality.Name}] takes {amount} {item}(s) from {stolenFrom} without asking{rollSummary}", "e0876b");
                 Memory.Record("steal", $"Took {amount} {item}(s) from {stolenFrom} without asking.");
                 _thoughtLog.Log(Personality.Name, "STEAL", $"stole {amount} {item} from {stolenFrom}");
+
+                // The one action's own path into WorldEventLog, apart
+                // from AnnounceVisibleAction() below — everyone else
+                // nearby genuinely never gets a chance at this one,
+                // only whoever's own Wisdom roll beats this NPC's
+                // Dexterity (see AnnounceStealthAttempt's own comment).
+                WorldEventLog.AnnounceStealthAttempt(
+                    Personality.Name, stolenFrom, Actor.GlobalPosition,
+                    $"You notice {Personality.Name} take something from {stolenFrom} without asking.",
+                    Actor.Stats.DexterityMod, _world.CharactersWithStats());
             }
         }
-
-        if (actionId == "persuade")
+        else if (success)
         {
-            // Delivered through SpeechLog exactly like speak — same
-            // hearing-radius gate, same "heard once, remembered"
-            // semantics — just with the roll's outcome folded into the
-            // framing the target actually hears. The target's own Mind
-            // still decides what to do about it next turn; this never
-            // picks for them (see Mind's persuade tool description).
-            string framing = success ? "tries hard to convince you" : "tries to convince you, but doesn't seem very persuasive";
-            SpeechLog.Say(Personality.Name, Actor.GlobalPosition, $"({framing}) {message}");
-            _uiLog($"[{Personality.Name}] {(success ? "persuasively" : "unconvincingly")} tells {targetId}: \"{message}\"{rollSummary}", success ? "e8d9a9" : "e0876b");
-            Memory.Record("persuade", $"Tried to persuade {targetId}: \"{message}\" — {(success ? "landed persuasively" : "fell flat")}.");
-            _thoughtLog.Log(Personality.Name, "PERSUADE", $"{targetId}: \"{message}\" ({(success ? "persuasive" : "unconvincing")}){rollSummary}");
+            AnnounceVisibleAction(actionId, targetId, data);
         }
 
         UpdateLastResult(success, actionId, targetId, reason);
 
         // Absorb THIS action's own effect on inventory into the baseline
         // now, before TakeTurn() runs again below — see
-        // NoticeInventoryChanges()'s comment for why the ordering matters.
-        _lastKnownInventory = Actor.Inventory.Snapshot();
+        // InventoryWatcher.AbsorbOwnChange()'s comment for why the
+        // ordering matters.
+        _inventoryWatcher.AbsorbOwnChange(Actor.Inventory);
 
         if (Memory.NeedsCompression)
         {
@@ -526,10 +716,17 @@ public partial class NpcAgent : Node, IWorldCharacter
             _thoughtLog.Log(Personality.Name, "MEMORY_COMPRESSED", Memory.Diary);
         }
 
-        if (actionId == "wait")
-            await Actor.ToSignal(Actor.GetTree().CreateTimer(1.0), SceneTreeTimer.SignalName.Timeout);
-        else if (actionId == "sleep")
-            await Actor.ToSignal(Actor.GetTree().CreateTimer(4.0), SceneTreeTimer.SignalName.Timeout);
+        // Every other action (pick_apple, speak, travel, trade, steal,
+        // ...) had NO pause here at all — the moment an action
+        // resolved, TakeTurn() ran again immediately, so on a fast model
+        // three NPCs could chain thoughts/speech/results back to back
+        // with nothing to actually read. MinTurnPause is a real floor
+        // under every action. sleep no longer needs a case here at all —
+        // by the time this line runs, NPCActor.ProcessSleeping() has
+        // already held it in State.Sleeping for a real 20 seconds, so
+        // adding yet another pause on top would just be stacking delays.
+        double pause = actionId == "wait" ? 1.0 : MinTurnPause;
+        await Actor.ToSignal(Actor.GetTree().CreateTimer(pause, processAlways: false), SceneTreeTimer.SignalName.Timeout);
 
         await TakeTurn();
     }

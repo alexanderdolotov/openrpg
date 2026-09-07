@@ -25,8 +25,23 @@ PlayerState="*res://scripts/PlayerState.cs"
 
 [display]
 
-window/size/viewport_width=1500
-window/size/viewport_height=1150
+; viewport_width/height is the fixed DESIGN resolution — every anchor,
+; offset, and font size in the UI, and every world-space coordinate via
+; Main.cs's AttachFollowCamera() zoom, is sized relative to this.
+; stretch/mode "canvas_items" is what makes the actual window (mode=2,
+; maximized — fills whatever screen it's on, high-DPI or not) uniformly
+; scale that fixed design up to fit, instead of Godot's default
+; "disabled" stretch, which just matches the viewport 1:1 to window size
+; with no scaling at all — the window can get bigger without anything ON
+; SCREEN getting bigger. A SMALLER design resolution stretched to the
+; SAME physical window is a LARGER scale factor, which is the whole
+; mechanism this leans on. Went from 1500x1150 -> 1050x800 (too big) ->
+; 1250x950 (overcorrected, too small) -> here: splitting the difference.
+window/size/viewport_width=1150
+window/size/viewport_height=880
+window/size/mode=2
+window/stretch/mode="canvas_items"
+window/stretch/aspect="expand"
 
 [dotnet]
 

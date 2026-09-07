@@ -21,15 +21,24 @@ public static class NpcFactory
     {
         var actor = new NPCActor { Name = personality.Name, Position = startPosition };
 
+        // actor goes directly under parent (the Y-sorted world layer) —
+        // the SAME tree depth PlayerCharacter sits at (see
+        // Main.CreatePlayer), not nested a level deeper under NpcAgent
+        // below. This used to be AddChild(actor) inside
+        // NpcAgent.Initialize(), making NpcAgent (a plain Node, not a
+        // CanvasItem) actor's real scene-tree parent — Y-sort compares
+        // canvas-item depth, and an NPC one level deeper than the
+        // player it's supposed to sort identically against turned out
+        // to actually draw wrong (NPCs rendering in front of tree
+        // canopy the player correctly goes behind). Every character
+        // now sits at one uniform depth under the world layer, no
+        // exceptions, so there's nothing left to reason about there.
+        parent.AddChild(actor); // runs NPCActor._Ready() synchronously (parent's already in the tree), which is what SetCharacterSprite() below needs to exist first
+
         var agent = new NpcAgent();
-        parent.AddChild(agent); // must be in the tree before Initialize() adds children under it
+        parent.AddChild(agent); // a sibling of actor, not its parent — NpcAgent has no visual presence of its own, so it has no reason to be part of the render tree
         agent.Initialize(id, personality, actor, config.CreateProvider(), worldContext, thoughtLog, uiLog, config.PureLlmMode);
 
-        // Only safe after Initialize() — that's what calls AddChild(actor),
-        // which is what runs NPCActor._Ready() and actually creates the
-        // Sprite node SetCharacterSprite() configures. Calling this any
-        // earlier (actor isn't in the scene tree yet) would hit a null
-        // sprite.
         actor.SetCharacterSprite(spriteVariant);
 
         world.Register(id, actor);

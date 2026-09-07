@@ -15,7 +15,10 @@ using Godot;
 // pattern in this codebase.
 public static class CharacterSpriteBuilder
 {
-    private const int FrameSize = 16;
+    // Public — NPCActor references this directly to anchor the sprite at
+    // the character's feet rather than duplicating the 16 as its own
+    // magic number.
+    public const int FrameSize = 16;
     private const int FramesPerRow = 3;
     private const int RowsPerCharacter = 3;
 
