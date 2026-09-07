@@ -13,4 +13,14 @@ public static class GameSettings
     // are fully implemented (see NPCActor's Incapacitated state and
     // Main's death handling); this just picks which one actually fires.
     public static bool PermadeathEnabled = false;
+
+    // On by default: every NPC and animal shows a small floating
+    // Health/Fatigue/Hunger readout above its head (see
+    // VitalsBarDisplay), not just the player's own VitalsPanel. Meant
+    // to actually change mid-session — the in-game Settings menu's
+    // checkbox flips this directly, and every existing display picks
+    // it up on its own next frame (see VitalsBarDisplay._Process),
+    // unlike PermadeathEnabled above which is only ever read once at
+    // boot.
+    public static bool ShowVitalsBars = true;
 }

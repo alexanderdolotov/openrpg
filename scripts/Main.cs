@@ -99,8 +99,31 @@ public partial class Main : Node2D
     private Node2D _worldLayer;
 
     private Home _home;
+    private FirePit _firePit;
     private RichTextLabel _debugLog;
     private NpcThoughtLogger _thoughtLog;
+
+    // The player's own reference — needed for RefreshNpcFilterBar's
+    // "who's actually near ME" distance check below. Everything else
+    // in this file reaches the player only indirectly through _agents
+    // (typed as the generic IWorldCharacter), which is fine for
+    // perception/targeting but not for "the player specifically."
+    private PlayerCharacter _player;
+
+    // "Add filter buttons to the top [of the log] for nearby NPCs...
+    // once I'm not in their vicinity anymore, remove the filter
+    // automatically." _npcFilterButtons tracks which NPCs currently
+    // have a button showing (one HBoxContainer child each, keyed by
+    // DisplayName — the exact string every one of their own log lines
+    // starts with, see ExtractSpeaker); RefreshNpcFilterBar adds/
+    // removes them as the player walks in and out of SpeechLog.
+    // HearingRadius — "nearby" meaning the same thing here as it does
+    // for actually hearing someone speak. See Log()/SetActiveLogFilter/
+    // RebuildDebugLogDisplay for the filtering itself.
+    private HBoxContainer _npcFilterBar;
+    private readonly Dictionary<string, Button> _npcFilterButtons = new();
+    private float _npcFilterRefreshTimer;
+    private const float NpcFilterRefreshInterval = 0.5f; // real seconds between rescans — a handful of NPCs, no need to check every physics frame
 
     // Kept as a field (not just a _Ready()-local) so GenerateContentAt()
     // can bump ContentVersion whenever exploration-driven generation
@@ -132,9 +155,18 @@ public partial class Main : Node2D
 
     public override void _Process(double delta)
     {
-        if (_logScrollCaughtUp) return;
-        _logScrollCaughtUp = true;
-        _debugLog.ScrollToLine(_debugLog.GetLineCount());
+        if (!_logScrollCaughtUp)
+        {
+            _logScrollCaughtUp = true;
+            _debugLog.ScrollToLine(_debugLog.GetLineCount());
+        }
+
+        _npcFilterRefreshTimer += (float)delta;
+        if (_npcFilterRefreshTimer >= NpcFilterRefreshInterval)
+        {
+            _npcFilterRefreshTimer = 0f;
+            RefreshNpcFilterBar();
+        }
     }
 
     public override void _Ready()
@@ -151,13 +183,27 @@ public partial class Main : Node2D
         // doesn't leak down past that override.
         ProcessMode = ProcessModeEnum.Always;
 
+        // Every one of these is static, meaning it lives outside the
+        // scene tree "Restart Game" (SettingsPanel's own RestartButton)
+        // reloads — without resetting them here, a restarted session
+        // would silently inherit stale state from whatever session ran
+        // before it in this same process (first boot has nothing to
+        // clear yet, so this is a harmless no-op there). Found auditing
+        // after the restart button existed to actually expose it — see
+        // each Reset()'s own comment for what specifically broke.
+        WorldExploration.Reset();
+        SpeechLog.Reset();
+        WorldEventLog.Reset();
+
         BuildWorld();
         BuildLighting();
         _debugLog = GetNode<RichTextLabel>("UI/DebugLog");
+        _npcFilterBar = GetNode<HBoxContainer>("UI/NpcFilterBar");
         BuildPathGrid();
 
         var pauseButton = GetNode<Button>("UI/PauseButton");
         pauseButton.Pressed += TogglePause;
+        BuildSettingsMenu();
 
         MindConfig config = MindConfig.Load();
         GameSettings.PermadeathEnabled = config.PermadeathEnabled;
@@ -167,7 +213,7 @@ public partial class Main : Node2D
             (config.LogNpcThoughts ? $" [logging to {_thoughtLog.LogPath}]" : ""), "6f8068");
         _thoughtLog.Log("*", "RUN_START", $"backend={config.Provider} model={config.Model} pure_llm_mode={config.PureLlmMode}");
 
-        _world = new WorldContext { Trees = _trees, FishingSpots = _fishingSpots, PineTrees = _pineTrees, BerryBushes = _berryBushes, Sticks = _sticks, Home = _home, Flagpoles = _flagpoles, Agents = _agents, Animals = _animals };
+        _world = new WorldContext { Trees = _trees, FishingSpots = _fishingSpots, PineTrees = _pineTrees, BerryBushes = _berryBushes, Sticks = _sticks, Home = _home, FirePit = _firePit, Flagpoles = _flagpoles, Agents = _agents, Animals = _animals };
         WorldContext world = _world;
 
         List<NpcDefinition> roster = NpcRoster.Load();
@@ -200,6 +246,7 @@ public partial class Main : Node2D
         }
 
         PlayerCharacter player = CreatePlayer(world);
+        _player = player;
         AttachFollowCamera(player);
         player.Downed += () => OnCharacterDowned(player, player.DisplayName);
 
@@ -399,6 +446,13 @@ public partial class Main : Node2D
         _worldLayer.AddChild(_home);
         World().Register("home", _home);
         _decor.Add(_home);
+
+        // "A fire pit near the house" — just south of it, close enough
+        // to read as part of the same little homestead.
+        _firePit = new FirePit { Name = "FirePit", Position = new Vector2(150, 300) };
+        _worldLayer.AddChild(_firePit);
+        World().Register("firepit", _firePit);
+        _decor.Add(_firePit);
 
         Vector2[] treePositions = { new(600, 120), new(800, 180), new(680, 380) };
         for (int i = 0; i < treePositions.Length; i++)
@@ -608,7 +662,7 @@ public partial class Main : Node2D
         var animal = new T();
         string id = $"animal_{_nextAnimalId++}";
         _worldLayer.AddChild(animal); // Y-sorted, same as any other object with real visual height
-        animal.Initialize(_world, pos);
+        animal.Initialize(_world, pos, Log, _thoughtLog);
         _animals.Add(animal);
         _world.Animals.Add(animal);
         World().Register(id, animal);
@@ -919,14 +973,18 @@ public partial class Main : Node2D
     // BuildVisibilityLight()) work ADDITIVELY on top of this, brightening
     // their covered radius back up rather than the other way around
     // (there's no "invisible until lit" occlusion here — that's the
-    // actual fog-of-war step, deliberately not this one). Same
-    // primitive this'll build on for night-time later: a lower DimColor
-    // after dark, wider/dimmer lights near a light source.
-    private static readonly Color DimColor = new(0.55f, 0.55f, 0.62f, 1f);
-
+    // actual fog-of-war step, deliberately not this one).
+    //
+    // The "night-time later" this comment used to promise is
+    // DayNightCycle now — a CanvasModulate subclass that cycles this
+    // same baseline between day and a darker, blue-purple night rather
+    // than sitting at one fixed color forever. A child of _worldLayer
+    // (Pausable), not Main (Always), so its own clock freezes right
+    // along with everything else while the game is paused — see its
+    // own header for the full reasoning.
     private void BuildLighting()
     {
-        AddChild(new CanvasModulate { Name = "WorldDimmer", Color = DimColor });
+        _worldLayer.AddChild(new DayNightCycle { Name = "WorldDimmer" });
     }
 
     private void BuildPathGrid()
@@ -971,6 +1029,58 @@ public partial class Main : Node2D
         GetNode<Button>("UI/PauseButton").Text = paused ? "Resume" : "Pause";
     }
 
+    // Wires the Settings button/panel (see Main.tscn's own comment on
+    // that node — structure lives there, visuals and behavior live
+    // here). Deliberately does NOT auto-pause when opened — everything
+    // in the panel is a quick, deliberate click (toggle a checkbox,
+    // restart, exit), not something that needs the world frozen to use
+    // safely; Space is still right there if the player wants that.
+    private void BuildSettingsMenu()
+    {
+        var settingsButton = GetNode<Button>("UI/SettingsButton");
+        var panel = GetNode<PanelContainer>("UI/SettingsPanel");
+        var vitalsBarsCheck = GetNode<CheckBox>("UI/SettingsPanel/Margin/VBox/VitalsBarsCheck");
+        var restartButton = GetNode<Button>("UI/SettingsPanel/Margin/VBox/RestartButton");
+        var exitButton = GetNode<Button>("UI/SettingsPanel/Margin/VBox/ExitButton");
+        var closeButton = GetNode<Button>("UI/SettingsPanel/Margin/VBox/CloseButton");
+
+        // A real background, not the barely-visible default PanelContainer
+        // style — same dark-panel-on-garden aesthetic as LogPanel's own
+        // ColorRect, just as a StyleBox here since PanelContainer draws
+        // through one rather than being one.
+        panel.AddThemeStyleboxOverride("panel", new StyleBoxFlat
+        {
+            BgColor = new Color(0.05f, 0.07f, 0.05f, 0.97f),
+            BorderColor = new Color(0.4f, 0.5f, 0.35f),
+            BorderWidthLeft = 2, BorderWidthTop = 2, BorderWidthRight = 2, BorderWidthBottom = 2,
+            CornerRadiusTopLeft = 8, CornerRadiusTopRight = 8, CornerRadiusBottomLeft = 8, CornerRadiusBottomRight = 8,
+        });
+        foreach (Label label in panel.FindChildren("*", "Label"))
+            label.AddThemeColorOverride("font_color", new Color(0.92f, 0.97f, 0.9f));
+        foreach (CheckBox check in panel.FindChildren("*", "CheckBox"))
+            check.AddThemeColorOverride("font_color", new Color(0.92f, 0.97f, 0.9f));
+
+        vitalsBarsCheck.ButtonPressed = GameSettings.ShowVitalsBars;
+
+        settingsButton.Pressed += () => panel.Visible = !panel.Visible;
+        closeButton.Pressed += () => panel.Visible = false;
+        vitalsBarsCheck.Toggled += pressed => GameSettings.ShowVitalsBars = pressed;
+
+        // Unpause explicitly first — SceneTree.Paused is a tree-level
+        // flag ReloadCurrentScene() doesn't reset on its own, so
+        // restarting while paused would otherwise hand back a brand
+        // new game that's frozen from the very first frame with no
+        // obvious way back (the new PauseButton reads "Pause", not
+        // "Resume," since its own _Ready() has no idea the tree is
+        // still paused).
+        restartButton.Pressed += () =>
+        {
+            GetTree().Paused = false;
+            GetTree().ReloadCurrentScene();
+        };
+        exitButton.Pressed += () => GetTree().Quit();
+    }
+
     // AppendText(), not a full Text replace of a rebuilt _logLines join —
     // DebugLog's scroll_follow=true (Main.tscn) is Godot's own "only
     // autoscroll if the user was already at the bottom, leave it alone
@@ -1005,13 +1115,86 @@ public partial class Main : Node2D
     // sitting unscrolled at the top until something else nudged it
     // later. Calling ScrollToLine() immediately, synchronously, fixed
     // both).
+    // The exact (line, color) last written — not just line text, since
+    // the same words in a different color would read as a genuinely
+    // different event. Compared BEFORE the 200-char truncation/bbcode
+    // escaping below so two calls that only differ past the cutoff
+    // still count as identical (matches what the reader would actually
+    // see either way).
+    private string _lastLoggedLine;
+    private string _lastLoggedColor;
+
+    // Everything ever logged, bounded to the same MaxLogLines cap the
+    // visible RichTextLabel itself enforces — kept independently of
+    // what's currently on screen so a filter toggle can rebuild the
+    // visible view from real history, not just start filtering
+    // whatever gets logged from that point on. See SetActiveLogFilter/
+    // RebuildDebugLogDisplay.
+    private struct LogLine
+    {
+        public string Speaker;
+        public string Text;
+        public string Color;
+    }
+    private readonly List<LogLine> _logHistory = new();
+
+    // null = no filter, every line shows. Otherwise this is exactly
+    // one DisplayName (an NpcAgent's own — see ExtractSpeaker) and only
+    // lines starting with that bracket are visible. Set/cleared by
+    // SetActiveLogFilter, from either a filter-bar button click or
+    // RefreshNpcFilterBar noticing its NPC walked out of range.
+    private string _activeLogFilter;
+
     private void Log(string line, string color = "d8ddd0")
     {
+        // "If prev row is exact same, don't log it" — a per-tick
+        // decision loop (an animal re-deciding "still fleeing the same
+        // wolf" every physics frame, say) can otherwise call this with
+        // the identical line dozens of times a second even when
+        // nothing actually changed, burying everything else under
+        // repeats of one event. Only collapses IMMEDIATE repeats
+        // (three different lines then the same one again still logs),
+        // which is what "spam from one stuck event" actually looks
+        // like, not a blanket "never say this twice" rule.
+        if (line == _lastLoggedLine && color == _lastLoggedColor)
+            return;
+        _lastLoggedLine = line;
+        _lastLoggedColor = color;
+
+        // Extracted from the RAW line, before bbcode-escaping below
+        // turns real brackets into "[lb]" and makes them unparseable.
+        // Every logged line starts with "[Whoever]" by convention —
+        // NpcAgent's own _uiLog calls, Animal.LogEvent, and this
+        // class's own "[world]"/"[player]" lines all follow it.
+        string speaker = ExtractSpeaker(line);
+
         // escape literal brackets so LLM text can never be read as a bbcode tag
         string safe = line.Replace("[", "[lb]");
         if (safe.Length > 200)
             safe = safe.Substring(0, 197) + "...";
 
+        _logHistory.Add(new LogLine { Speaker = speaker, Text = safe, Color = color });
+        while (_logHistory.Count > MaxLogLines)
+            _logHistory.RemoveAt(0);
+
+        // Filtered out of the live view right now — still recorded
+        // above, so clearing the filter later brings it right back
+        // instead of only whatever logs from that point on.
+        if (_activeLogFilter != null && speaker != _activeLogFilter)
+            return;
+
+        AppendVisibleLine(safe, color);
+    }
+
+    private static string ExtractSpeaker(string line)
+    {
+        if (string.IsNullOrEmpty(line) || line[0] != '[') return null;
+        int close = line.IndexOf(']');
+        return close > 1 ? line.Substring(1, close - 1) : null;
+    }
+
+    private void AppendVisibleLine(string safe, string color)
+    {
         VScrollBar scrollBar = _debugLog.GetVScrollBar();
         // page is how much content is already visible — "at the bottom"
         // means the visible page's far edge already reaches MaxValue,
@@ -1036,5 +1219,83 @@ public partial class Main : Node2D
         // true bottom (max_value - page, not just approximately).
         if (wasAtBottom)
             _debugLog.ScrollToLine(_debugLog.GetLineCount());
+    }
+
+    // Full re-render of the visible log from _logHistory under whatever
+    // _activeLogFilter is now set to — the only way a filter toggle can
+    // affect lines already on screen, not just new ones from this point
+    // forward. Always ends scrolled to the bottom of whatever's now
+    // showing, same as a live Log() call would.
+    private void RebuildDebugLogDisplay()
+    {
+        _debugLog.Clear();
+        foreach (LogLine entry in _logHistory)
+        {
+            if (_activeLogFilter == null || entry.Speaker == _activeLogFilter)
+                _debugLog.AppendText($"[color=#{entry.Color}]{entry.Text}[/color]\n");
+        }
+        _debugLog.ScrollToLine(_debugLog.GetLineCount());
+    }
+
+    // "Add filter buttons to the top for nearby NPCs... once I'm not in
+    // their vicinity anymore, remove the filter automatically." Run on
+    // a real-time timer from _Process (see NpcFilterRefreshInterval),
+    // not every frame — a handful of NPCs, no need to rescan that often.
+    // Diffs the button bar against who's actually within
+    // SpeechLog.HearingRadius of the player right now: adds a button
+    // for anyone newly in range, removes one for anyone who's left —
+    // and if the NPC that just left was the active filter, clears it
+    // too, rather than leaving the log stuck filtered on someone with
+    // no button left to un-filter it.
+    private void RefreshNpcFilterBar()
+    {
+        if (_player == null) return;
+
+        var nearby = new HashSet<string>();
+        foreach (IWorldCharacter agent in _agents)
+        {
+            if (ReferenceEquals(agent, _player)) continue;
+            if (agent.GlobalPosition.DistanceTo(_player.GlobalPosition) <= SpeechLog.HearingRadius)
+                nearby.Add(agent.DisplayName);
+        }
+
+        foreach (string name in new List<string>(_npcFilterButtons.Keys))
+        {
+            if (nearby.Contains(name)) continue;
+            _npcFilterButtons[name].QueueFree();
+            _npcFilterButtons.Remove(name);
+            if (_activeLogFilter == name)
+                SetActiveLogFilter(null);
+        }
+
+        foreach (string name in nearby)
+        {
+            if (_npcFilterButtons.ContainsKey(name)) continue;
+            var button = new Button
+            {
+                Text = name,
+                ToggleMode = true,
+                FocusMode = Control.FocusModeEnum.None,
+            };
+            // Captured 'name', not the button's own .Text — same
+            // string either way, but this is the one actually compared
+            // against elsewhere (dictionary key, _activeLogFilter).
+            button.Pressed += () => SetActiveLogFilter(_activeLogFilter == name ? null : name);
+            _npcFilterBar.AddChild(button);
+            _npcFilterButtons[name] = button;
+        }
+    }
+
+    // One filter active at a time — clicking the already-active button
+    // clears it (back to seeing everything), clicking a different one
+    // switches straight to it. SetPressedNoSignal, not .ButtonPressed =,
+    // so reflecting the new state on every button doesn't itself fire
+    // another Pressed and recurse.
+    private void SetActiveLogFilter(string name)
+    {
+        _activeLogFilter = name;
+        foreach (KeyValuePair<string, Button> kv in _npcFilterButtons)
+            kv.Value.SetPressedNoSignal(kv.Key == name);
+        RebuildDebugLogDisplay();
     }
 }

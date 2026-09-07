@@ -40,6 +40,7 @@ public static class NpcFactory
         agent.Initialize(id, personality, actor, config.CreateProvider(), worldContext, thoughtLog, uiLog, config.PureLlmMode);
 
         actor.SetCharacterSprite(spriteVariant);
+        actor.SetDisplayName(personality.Name);
 
         world.Register(id, actor);
         // Also registered under its display name — this is what lets

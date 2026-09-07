@@ -93,6 +93,12 @@ internal class RecentEventBuffer
         return result;
     }
 
+    // For SpeechLog.Reset()/WorldEventLog.Reset() — see their own
+    // comments for why this needs to exist at all (a static buffer, so
+    // it otherwise survives a scene reload the "Restart Game" button
+    // triggers, well past the point where it stops meaning anything).
+    public void Clear() => _recent.Clear();
+
     private void Prune()
     {
         ulong now = Time.GetTicksMsec();

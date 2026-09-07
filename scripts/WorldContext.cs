@@ -22,6 +22,7 @@ public class WorldContext
     public List<Stick> Sticks;
 
     public Home Home;
+    public FirePit FirePit;
 
     // Distant, non-resource landmarks an NPC can only reach by walking
     // straight toward them (no interaction, no gathering) — keyed by
@@ -67,6 +68,22 @@ public class WorldContext
         NPCActor actor => actor, // covers PlayerCharacter
         _ => null,
     };
+
+    // The reverse of ActorOf() — given an NPCActor (say, whatever an
+    // Animal's own CurrentTarget currently is), find the display name
+    // of whichever Agents entry it belongs to. Used for perception
+    // lines that need to name a THIRD party by name — "a wolf is
+    // attacking Wren right now" — not just describe this NPC's own
+    // situation. Null if the actor isn't a currently-registered
+    // character at all (shouldn't normally happen, but a target
+    // reference can outlive a death/despawn by a frame or two).
+    public string NameOf(NPCActor actor)
+    {
+        foreach (IWorldCharacter c in Agents)
+            if (ActorOf(c) == actor)
+                return c.DisplayName;
+        return null;
+    }
 
     // Every character currently in the world, with the Wisdom modifier
     // WorldEventLog.AnnounceStealthAttempt() rolls against — it filters

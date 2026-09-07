@@ -13,6 +13,7 @@ script = ExtResource("1")
 [node name="UI" type="CanvasLayer" parent="." unique_id=511911978]
 
 [node name="PauseButton" type="Button" parent="UI"]
+focus_mode = 0
 anchor_left = 0.5
 anchor_right = 0.5
 offset_left = -55.0
@@ -21,6 +22,62 @@ offset_right = 55.0
 offset_bottom = 52.0
 theme_override_font_sizes/font_size = 16
 text = "Pause"
+
+[node name="SettingsButton" type="Button" parent="UI"]
+focus_mode = 0
+anchor_left = 0.5
+anchor_right = 0.5
+offset_left = 65.0
+offset_top = 18.0
+offset_right = 175.0
+offset_bottom = 52.0
+theme_override_font_sizes/font_size = 16
+text = "Settings"
+
+; Structure only — background style, spacing polish, and button
+; wiring all happen in Main.cs (BuildSettingsMenu), same "dynamic
+; visuals live in code" pattern the rest of this project already uses
+; (see NPCActor's speech bubble/emotion label for the same split).
+[node name="SettingsPanel" type="PanelContainer" parent="UI"]
+visible = false
+anchor_left = 0.5
+anchor_top = 0.5
+anchor_right = 0.5
+anchor_bottom = 0.5
+offset_left = -150.0
+offset_top = -130.0
+offset_right = 150.0
+offset_bottom = 130.0
+
+[node name="Margin" type="MarginContainer" parent="UI/SettingsPanel"]
+theme_override_constants/margin_left = 18
+theme_override_constants/margin_top = 18
+theme_override_constants/margin_right = 18
+theme_override_constants/margin_bottom = 18
+
+[node name="VBox" type="VBoxContainer" parent="UI/SettingsPanel/Margin"]
+theme_override_constants/separation = 12
+
+[node name="TitleLabel" type="Label" parent="UI/SettingsPanel/Margin/VBox"]
+theme_override_font_sizes/font_size = 20
+text = "Settings"
+
+[node name="VitalsBarsCheck" type="CheckBox" parent="UI/SettingsPanel/Margin/VBox"]
+focus_mode = 0
+button_pressed = true
+text = "Show stat bars above NPCs/animals"
+
+[node name="RestartButton" type="Button" parent="UI/SettingsPanel/Margin/VBox"]
+focus_mode = 0
+text = "Restart Game"
+
+[node name="ExitButton" type="Button" parent="UI/SettingsPanel/Margin/VBox"]
+focus_mode = 0
+text = "Exit to Desktop"
+
+[node name="CloseButton" type="Button" parent="UI/SettingsPanel/Margin/VBox"]
+focus_mode = 0
+text = "Close"
 
 [node name="LogPanel" type="ColorRect" parent="UI" unique_id=1721643609]
 anchors_preset = 12
@@ -46,56 +103,84 @@ theme_override_colors/font_color = Color(0.95, 0.85, 0.55, 1)
 text = "▶ Doing something..."
 
 [node name="PickAppleButton" type="Button" parent="UI/ActionPanel"]
+focus_mode = 0
 visible = false
 text = "Pick Apple"
 
 [node name="CatchFishButton" type="Button" parent="UI/ActionPanel"]
+focus_mode = 0
 visible = false
 text = "Catch Fish"
 
 [node name="GatherPineconeButton" type="Button" parent="UI/ActionPanel"]
+focus_mode = 0
 visible = false
 text = "Gather Pinecone"
 
 [node name="GatherBerryButton" type="Button" parent="UI/ActionPanel"]
+focus_mode = 0
 visible = false
 text = "Gather Berry"
 
 [node name="DepositButton" type="Button" parent="UI/ActionPanel"]
+focus_mode = 0
 visible = false
 text = "Deposit"
 
 [node name="TravelButton" type="Button" parent="UI/ActionPanel"]
+focus_mode = 0
 visible = false
 text = "Travel"
 
 [node name="FollowButton" type="Button" parent="UI/ActionPanel"]
+focus_mode = 0
 visible = false
 text = "Follow"
 
 [node name="TradeButton" type="Button" parent="UI/ActionPanel"]
+focus_mode = 0
 visible = false
 text = "Trade"
 
 [node name="StealButton" type="Button" parent="UI/ActionPanel"]
+focus_mode = 0
 visible = false
 text = "Steal"
 
 [node name="AttackButton" type="Button" parent="UI/ActionPanel"]
+focus_mode = 0
 visible = false
 text = "Attack"
 
 [node name="EatButton" type="Button" parent="UI/ActionPanel"]
+focus_mode = 0
 visible = false
 text = "Eat"
 
 [node name="PickUpStickButton" type="Button" parent="UI/ActionPanel"]
+focus_mode = 0
 visible = false
 text = "Pick Up Stick"
 
 [node name="SleepButton" type="Button" parent="UI/ActionPanel"]
+focus_mode = 0
 visible = false
 text = "Sleep"
+
+[node name="LightFireButton" type="Button" parent="UI/ActionPanel"]
+focus_mode = 0
+visible = false
+text = "Light Fire"
+
+[node name="MakeTorchButton" type="Button" parent="UI/ActionPanel"]
+focus_mode = 0
+visible = false
+text = "Make Torch"
+
+[node name="CookMeatButton" type="Button" parent="UI/ActionPanel"]
+focus_mode = 0
+visible = false
+text = "Cook Meat"
 
 [node name="VitalsPanel" type="VBoxContainer" parent="UI"]
 anchor_left = 1.0
@@ -103,7 +188,7 @@ anchor_right = 1.0
 offset_left = -220.0
 offset_top = 18.0
 offset_right = -18.0
-offset_bottom = 90.0
+offset_bottom = 126.0
 theme_override_constants/separation = 4
 
 [node name="HealthLabel" type="Label" parent="UI/VitalsPanel"]
@@ -126,6 +211,16 @@ max_value = 100.0
 value = 100.0
 show_percentage = false
 
+[node name="HungerLabel" type="Label" parent="UI/VitalsPanel"]
+theme_override_font_sizes/font_size = 14
+theme_override_colors/font_color = Color(0.92, 0.97, 0.9, 1)
+text = "Hunger"
+
+[node name="HungerBar" type="ProgressBar" parent="UI/VitalsPanel"]
+max_value = 100.0
+value = 100.0
+show_percentage = false
+
 [node name="InventoryLabel" type="Label" parent="UI/VitalsPanel"]
 theme_override_font_sizes/font_size = 16
 theme_override_colors/font_color = Color(0.92, 0.97, 0.9, 1)
@@ -144,13 +239,24 @@ offset_bottom = -228.0
 theme_override_font_sizes/font_size = 18
 placeholder_text = "Press Enter to speak..."
 
-[node name="DebugLog" type="RichTextLabel" parent="UI" unique_id=566617227]
+[node name="NpcFilterBar" type="HBoxContainer" parent="UI"]
 anchors_preset = 12
 anchor_top = 1.0
 anchor_right = 1.0
 anchor_bottom = 1.0
 offset_left = 18.0
 offset_top = -220.0
+offset_right = -18.0
+offset_bottom = -196.0
+theme_override_constants/separation = 6
+
+[node name="DebugLog" type="RichTextLabel" parent="UI" unique_id=566617227]
+anchors_preset = 12
+anchor_top = 1.0
+anchor_right = 1.0
+anchor_bottom = 1.0
+offset_left = 18.0
+offset_top = -192.0
 offset_right = -18.0
 offset_bottom = -14.0
 theme_override_colors/default_color = Color(0.92, 0.97, 0.9, 1)

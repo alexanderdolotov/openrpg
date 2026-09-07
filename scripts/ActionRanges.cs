@@ -16,4 +16,5 @@ public static class ActionRanges
     public const float Attack = 50f; // close melee range
     public const float PickUpStick = 40f; // small item on the ground, has to actually be right there
     public const float SleepNearHome = 100f; // "near home" for NPCActor.CanSleep() — looser than Deposit's precise doorstep range, since lying down doesn't need to be exact
+    public const float FirePit = 60f; // close enough to actually feed/light it, same rough scale as Deposit's doorstep range
 }

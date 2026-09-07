@@ -39,9 +39,9 @@ public class Mind
     // Personality.DescribeForPrompt(), prepended per-call in Decide()
     // so the same instruction serves any NPC's personality.
     private const string ThinkInstruction =
-        "Given the situation below, write ONE short, plain sentence (under 15 words) of what you're actually thinking right now. Talk like a real person thinking to themselves, not a novelist — no metaphors, no describing the scenery, no flowery language. If your last action failed, especially more than once, say so plainly and react to it. Just the plain thought, nothing else.";
+        "Given the situation below, write ONE short, plain sentence (under 15 words) of what you're actually thinking right now. Talk like a real person thinking to themselves, not a novelist — no metaphors, no describing the scenery, no flowery language. If your last action failed, especially more than once, say so plainly and react to it. If the situation shows someone just said something to you — especially a direct request, like asking you to follow them or help with something — that's the single most important thing to react to right now, above anything else going on: think about THAT, specifically (agreeing, refusing, or being unsure are all real reactions — silently ignoring it and thinking about something else entirely is not, unless something more urgent is actively happening to you). Just the plain thought, nothing else.";
     private const string ActInstruction =
-        "Call exactly one of the provided tools that matches the plan below. If you were already in the middle of something — following someone, traveling somewhere, working toward a goal you'd set for yourself — lean toward sticking with it for a while rather than switching every single turn just because you technically can; a goal worth having is worth a bit of follow-through. Only actually change course when it's genuinely finished, clearly not working out, or something that actually matters more just happened — a real reason, not a passing whim. (This call is never even reached while something dangerous — a wolf or bear actively coming for you — is happening; see DecideThreatResponse below for that entirely separate, narrower decision.) If your last action failed — especially if it failed more than once in a row for the same reason — do not just repeat it; pick something that actually addresses why it failed (e.g. deposit before trying to pick or catch again, or choose a different target if one is depleted). travel is a valid choice on its own, out of curiosity, even toward somewhere you've never been and don't know the way to — you don't need a resource-gathering reason to go look at something. speak lets you say something out loud in your own words — anyone within hearing range right now may hear it and decide how to react on their own later, including being persuaded, won over, or talked into something if what you say actually lands with them; it does not control or compel anyone, and if nobody's around, nobody hears it, which is a perfectly normal outcome of speaking. follow lets you walk alongside someone nearby by name — a genuine choice you make (or don't) based on your own read of them and what's been said, not something anyone can force; re-decide it fresh every turn just like anything else, which means choosing follow AGAIN, turn after turn, is what actually keeps you with them — arriving next to them once doesn't mean you're done, they may well walk on right after, and only choosing something else is what actually stops you following. trade gives someone nearby an item you're actually carrying — a real choice about generosity or self-interest, entirely up to you. steal takes an item from someone nearby without asking and without them agreeing to it — you don't know for certain what they're carrying, only a guess, it takes real nerve and a little luck (you can simply fail even if they do have it), and it's not hidden from them forever, since anyone keeps their own count of what they're carrying and can notice later that something's missing. sleep rests where you are and fully restores your fatigue, but takes a while — worth doing once you're actually tired, not as a routine choice, and pay attention to your own fatigue level below: if you're exhausted, that's a real, physical reason to sleep before doing anything else, or to turn down something demanding (a long trip, more gathering) rather than push through it — nobody is forcing that consideration on you, it's just true of your own body right now. Set emotion to how you're genuinely feeling, reacting to what just happened as much as your personality — frustration or disappointment after a repeated failure, satisfaction after a success, not a fixed mood. Only ever target an id that is explicitly listed in the situation — never invent one that isn't there. Choose whichever tool actually fits who you are and what you want right now — nothing assigns you a role.";
+        "Call exactly one of the provided tools that matches the plan below. If you were already in the middle of something — following someone, traveling somewhere, working toward a goal you'd set for yourself — lean toward sticking with it for a while rather than switching every single turn just because you technically can; a goal worth having is worth a bit of follow-through. Only actually change course when it's genuinely finished, clearly not working out, or something that actually matters more just happened — a real reason, not a passing whim. (This call is never even reached while something dangerous — a wolf or bear actively coming for you — is happening; see DecideThreatResponse below for that entirely separate, narrower decision.) If your last action failed — especially if it failed more than once in a row for the same reason — do not just repeat it; pick something that actually addresses why it failed (e.g. deposit before trying to pick or catch again, or choose a different target if one is depleted). travel is a valid choice on its own, out of curiosity, even toward somewhere you've never been and don't know the way to — you don't need a resource-gathering reason to go look at something. speak lets you say something out loud in your own words — anyone within hearing range right now may hear it and decide how to react on their own later, including being persuaded, won over, or talked into something if what you say actually lands with them; it does not control or compel anyone, and if nobody's around, nobody hears it, which is a perfectly normal outcome of speaking. follow lets you walk alongside someone nearby by name — a genuine choice you make (or don't) based on your own read of them and what's been said, not something anyone can force; re-decide it fresh every turn just like anything else, which means choosing follow AGAIN, turn after turn, is what actually keeps you with them — arriving next to them once doesn't mean you're done, they may well walk on right after, and only choosing something else is what actually stops you following. If another character (not the player) just directly asked you to follow them or help with something, that request is the main thing to weigh right now — follow (if you're actually persuaded) or speak (to say yes, no, or ask something back) are both real, direct responses to it; picking something completely unrelated, like gathering, is turning them down without saying so, which is a worse look than an honest no. (A direct ask from the real human player never actually reaches this decision at all — it's answered separately, immediately, the turn it's heard; see DecidePlayerRequest.) trade gives someone nearby an item you're actually carrying — a real choice about generosity or self-interest, entirely up to you. steal takes an item from someone nearby without asking and without them agreeing to it — you don't know for certain what they're carrying, only a guess, it takes real nerve and a little luck (you can simply fail even if they do have it), and it's not hidden from them forever, since anyone keeps their own count of what they're carrying and can notice later that something's missing. sleep rests where you are and fully restores your fatigue (and health), but takes a while — worth doing once you're actually tired, not as a routine choice, and pay attention to your own fatigue level below: if you're exhausted, that's a real, physical reason to sleep before doing anything else, or to turn down something demanding (a long trip, more gathering) rather than push through it — nobody is forcing that consideration on you, it's just true of your own body right now. eat restores health and hunger from something you're already carrying — but pay attention to your health and hunger levels below even when eat ISN'T offered yet: if either is getting low and you're not carrying any food, that's a real, physical reason to go gather something you can actually eat (an apple, a fish, or a berry — a pinecone doesn't count, it's not food) before continuing with whatever else you were doing, the same way low fatigue is a real reason to go sleep. pick_up_stick is worth doing any time you notice one lying around, not just when you're already thinking about a fight — it's a real upgrade over bare hands, cheap to grab in passing. attack isn't only self-defense — hunting a wild animal (a rabbit, for its meat and fur) is a completely ordinary thing to go do on your own initiative when you want food or have nothing better in mind, the same as choosing to gather fruit or catch a fish; you don't need to already be in danger to pick it as your goal for the turn. light_fire (lighting the fire pit near home) and, once it's burning, make_torch (turning a stick you're carrying into a real personal light source) and cook_meat (turning raw rabbit meat — not edible on its own — into cooked meat, the single most filling food there is) are all genuinely worthwhile things to go do, not just emergency tools: tending the fire, making yourself a torch, or cooking up what you hunted are all perfectly normal reasons to head home for a while. Set emotion to how you're genuinely feeling, reacting to what just happened as much as your personality — frustration or disappointment after a repeated failure, satisfaction after a success, not a fixed mood. Only ever target an id that is explicitly listed in the situation — never invent one that isn't there. Choose whichever tool actually fits who you are and what you want right now — nothing assigns you a role.";
     // A completely separate, deliberately narrow instruction from
     // ActInstruction above — "the LLM can't choose to go pick berries
     // while a wolf is attacking them." Only ever used by
@@ -55,16 +55,49 @@ public class Mind
     private const string ThreatInstruction =
         "You are in immediate physical danger — a wild animal is actively coming for you or attacking you right now, described in the situation below. Choose exactly one of three responses: fight back, flee (run for it), or freeze (hold still, or cry out for help, rather than acting decisively). There is no fourth option — you cannot gather, travel, or do anything else right now. Weigh your own health and strength honestly: badly hurt, weak, or facing more than one attacker at once are all real reasons to flee or freeze rather than fight. A confident, strong, or cornered character may reasonably choose to fight. Pick whichever genuinely fits your personality and this exact situation.";
 
+    // The ally version of ThreatInstruction above — same three tools
+    // (fight/flee/freeze, reused rather than duplicated — see
+    // BuildThreatTools), but "fight" means going to help, not
+    // defending yourself, since it isn't this character's own fight.
+    private const string AllyThreatInstruction =
+        "A wild animal is actively attacking someone nearby right now — a friend, not you — described in the situation below. Choose exactly one of three responses: fight (go help them fight it off), flee (leave the area, put the danger behind you), or freeze (stay right where you are and just watch, doing nothing either way). There is no fourth option — you cannot gather, travel, or do anything else right now. This is a real choice about courage, not survival: weigh your own strength, health, and how brave you genuinely are. A strong, loyal, or brave character has a real reason to go help. A weak, badly hurt, or very fearful one has a real reason to hang back or leave instead — nobody should feel obligated to risk their life for someone else's fight. Pick whichever genuinely fits your personality and this exact situation.";
+
+    // Not a narrowed tool set like ThreatInstruction above — the same
+    // full menu BuildTools() always offers is still on the table here
+    // (agreeing to "let's go fishing" or "come pick apples with me"
+    // needs the real catch_fish/pick_apple/travel/follow/... tool, not
+    // a synthetic yes/no with no way to say WHAT you're agreeing to).
+    // What's different is skipping the normal think-then-act split
+    // (Decide() above) and swapping in this much more insistent
+    // instruction on its own — ActInstruction already asks, at length,
+    // for a direct reply to the player, but that's one soft nudge
+    // sitting alongside fourteen tools a small model is just as free to
+    // reach for instead, and in practice (see the thought log) it does:
+    // "thinking about" a direct request for several turns running
+    // without ever actually acting on it, because gathering or
+    // wandering off kept winning the vote. Called only for the one
+    // turn the player is actually waiting on an answer (see
+    // NpcAgent.HandleDirectPlayerRequest) — narrowing the INSTRUCTION
+    // rather than the tool list is what keeps "yes, let's fish" and
+    // "no thanks" both genuinely available without reopening the door
+    // to the drift this exists to close off.
+    private const string PlayerRequestInstruction =
+        "The real human player — not another character in this world — just said something to you directly, described in the situation below. Your only job this turn is to answer them, right now, with a real tool call: if you're genuinely going along with what they asked, call whichever single tool actually matches it — follow to walk with them, catch_fish/pick_apple/gather_pinecone/gather_berry to do the activity they proposed together, travel if they're inviting you somewhere, trade if they asked for an item, or whatever else genuinely fits what they said. If you're not going along with it, or you're genuinely unsure, call speak and say so directly, in your own words — a plain, honest no is a real answer. Weigh it honestly against your personality and whatever else is going on, same as any other choice, but reaching for something UNRELATED to what they said — gathering on your own, wandering off, waiting — is not a real option right now: that's dodging the question, not answering it, and a worse look than an honest no.";
+
     private const string SummarizeSystemPrompt =
         "You are compressing an NPC's memory log into a short diary paragraph (3-5 sentences) they'll carry forward. Preserve what matters for future decisions — where they've been, what they've done, anything notable, and anything said aloud (by them or heard from someone else), including who said or asked for what by name. A repeated identical failure is NOT routine detail — it's the opposite: state plainly what failed, why, and how many times, so it isn't attempted again pointlessly. Drop only genuinely routine, non-repeated detail (a single successful wait, a normal walk). Write in first person, past tense.";
 
-    private static readonly string[] ValidActions = { "pick_apple", "catch_fish", "gather_pinecone", "gather_berry", "deposit", "travel", "speak", "follow", "trade", "steal", "attack", "eat", "pick_up_stick", "sleep", "wait" };
+    private static readonly string[] ValidActions = { "pick_apple", "catch_fish", "gather_pinecone", "gather_berry", "deposit", "travel", "speak", "follow", "trade", "steal", "attack", "eat", "pick_up_stick", "sleep", "wait", "light_fire", "make_torch", "cook_meat" };
 
     // Every item type that currently exists in the world — trade/steal
     // both need a fixed, enumerable answer to "which item" for the tool
     // schema. Grows the day a new resource type does, same as
-    // ActionRanges already does per-action.
-    private static readonly string[] ItemTypes = { "apple", "fish", "pinecone", "blueberry", "blackberry", "raspberry", "stick" };
+    // ActionRanges already does per-action. Internal, not private —
+    // PlayerCharacter's own steal button rolls its blind guess from
+    // this exact same list, so a human player is guessing from the
+    // same pool an NPC's steal tool-call enum offers, not a
+    // hand-picked subset.
+    public static readonly string[] ItemTypes = { "apple", "fish", "pinecone", "blueberry", "blackberry", "raspberry", "stick", "rabbit_meat", "fur", "torch", "cooked_meat" };
 
     private readonly ILlmProvider _provider;
 
@@ -100,6 +133,16 @@ public class Mind
         // NPCActor.CanEat() — same "offered only when it's a real
         // option" treatment SleepAllowed already gets.
         public bool EatAllowed;
+
+        // FirePit.IsLit's own inverse/self — light_fire only offered
+        // when it's NOT already lit, make_torch only when it IS lit
+        // AND this character is actually carrying a stick to light.
+        public bool LightFireAllowed;
+        public bool MakeTorchAllowed;
+        // Same shape as MakeTorchAllowed — lit fire pit, plus actually
+        // carrying the specific raw ingredient (rabbit_meat here,
+        // stick there).
+        public bool CookMeatAllowed;
     }
 
     public readonly struct MindResult
@@ -194,14 +237,15 @@ public class Mind
     // (NpcAgent.MapThreatChoiceToAction turns the choice into an
     // actual attack/flee/wait afterward) so there's nothing here for
     // ParseToolCall's normal target-validation trust boundary to do.
-    public async Task<ThreatResult> DecideThreatResponse(string perceptionText, Personality personality)
+    public async Task<ThreatResult> DecideThreatResponse(string perceptionText, Personality personality, bool selfTargeted)
     {
         string persona = personality.DescribeForPrompt();
         float temperature = personality.Temperature;
+        string instruction = selfTargeted ? ThreatInstruction : AllyThreatInstruction;
 
         var messages = new object[]
         {
-            new { role = "system", content = $"{persona}\n\n{ThreatInstruction}" },
+            new { role = "system", content = $"{persona}\n\n{instruction}" },
             new { role = "user", content = perceptionText },
         };
         object[] tools = BuildThreatTools();
@@ -223,6 +267,47 @@ public class Mind
             : ThreatResult.Fail($"unknown_choice_{choice}");
     }
 
+    // The direct-request counterpart to DecideThreatResponse above —
+    // same "single round trip, no think-then-act split" shape, called
+    // instead of Decide() whenever the player spoke to this NPC this
+    // turn (see NpcAgent.HandleDirectPlayerRequest) — but reuses
+    // Decide()'s own BuildTools()/ParseToolCall() rather than a fixed
+    // three-option schema like DecideThreatResponse's: "agree" isn't
+    // one fixed action here, it's whichever real tool actually matches
+    // what the player asked for (follow, catch_fish, pick_apple, ...),
+    // and "decline" is just speak, already one of those same tools.
+    // Same bounded-retry posture as Decide()'s own act call — a
+    // malformed or off-menu tool call is one retry before giving up on
+    // the turn, not a hard failure.
+    public async Task<MindResult> DecidePlayerRequest(string perceptionText, AvailableTargets targets, Personality personality)
+    {
+        string persona = personality.DescribeForPrompt();
+        float temperature = personality.Temperature;
+
+        var messages = new object[]
+        {
+            new { role = "system", content = $"{persona}\n\n{PlayerRequestInstruction}" },
+            new { role = "user", content = perceptionText },
+        };
+        object[] tools = BuildTools(targets);
+
+        const int maxAttempts = 2;
+        ChatResult result = default;
+        ParseResult parsed = default;
+        for (int attempt = 1; attempt <= maxAttempts; attempt++)
+        {
+            result = await _provider.Chat(messages, tools, temperature);
+            if (!result.Ok)
+                return MindResult.Fail($"act_{result.Error}");
+
+            parsed = ParseToolCall(result.Message, targets);
+            if (parsed.Ok)
+                return MindResult.Success("", parsed.Action);
+        }
+
+        return MindResult.Fail(parsed.Error);
+    }
+
     private static object[] BuildThreatTools()
     {
         // No target_id/item/anything on any of these — WHICH animal to
@@ -239,7 +324,7 @@ public class Mind
                 function = new
                 {
                     name = "fight",
-                    description = "Turn and fight back against whatever is attacking you.",
+                    description = "Fight — either defend yourself against whatever is attacking you, or go help a friend who's being attacked, whichever actually applies right now.",
                     parameters = new { type = "object", properties = new { } },
                 },
             },
@@ -249,7 +334,7 @@ public class Mind
                 function = new
                 {
                     name = "flee",
-                    description = "Run away from the danger as fast as you can, right now.",
+                    description = "Run — get away from the danger, right now, whether it's after you or after someone else.",
                     parameters = new { type = "object", properties = new { } },
                 },
             },
@@ -259,7 +344,7 @@ public class Mind
                 function = new
                 {
                     name = "freeze",
-                    description = "Freeze in place, or cry out for help, rather than fighting back or running.",
+                    description = "Freeze — hold still and do nothing, whether that means calling for help yourself or just watching someone else's fight.",
                     parameters = new { type = "object", properties = new { } },
                 },
             },
@@ -427,6 +512,18 @@ public class Mind
                 if (!targets.SleepAllowed)
                     return ParseResult.Fail("sleep_not_available");
                 return ParseResult.Success(new GameAction(name, "", 0f, emotion));
+            case "light_fire":
+                if (!targets.LightFireAllowed)
+                    return ParseResult.Fail("light_fire_not_available");
+                return ParseResult.Success(new GameAction(name, "firepit", ActionRanges.FirePit, emotion));
+            case "make_torch":
+                if (!targets.MakeTorchAllowed)
+                    return ParseResult.Fail("make_torch_not_available");
+                return ParseResult.Success(new GameAction(name, "firepit", ActionRanges.FirePit, emotion));
+            case "cook_meat":
+                if (!targets.CookMeatAllowed)
+                    return ParseResult.Fail("cook_meat_not_available");
+                return ParseResult.Success(new GameAction(name, "firepit", ActionRanges.FirePit, emotion));
             default: // "wait"
                 return ParseResult.Success(new GameAction("wait", "", 0f, emotion));
         }
@@ -824,6 +921,80 @@ public class Mind
                             emotion = new { type = "string", @enum = EmotionExtensions.AllValues, description = "how you're feeling right now" },
                         },
                         required = new[] { "target_id", "emotion" },
+                    },
+                },
+            });
+        }
+
+        // Only offered while the fire pit is actually unlit — see
+        // FirePit's own header for the 5-minute duration.
+        if (targets.LightFireAllowed)
+        {
+            tools.Add(new
+            {
+                type = "function",
+                function = new
+                {
+                    name = "light_fire",
+                    description = "Walk to the fire pit near home and light it. Stays lit for a while, then goes out on its own.",
+                    parameters = new
+                    {
+                        type = "object",
+                        properties = new
+                        {
+                            emotion = new { type = "string", @enum = EmotionExtensions.AllValues, description = "how you're feeling right now" },
+                        },
+                        required = new[] { "emotion" },
+                    },
+                },
+            });
+        }
+
+        // Only offered while the fire pit IS lit and there's actually
+        // a stick on hand to light from it.
+        if (targets.MakeTorchAllowed)
+        {
+            tools.Add(new
+            {
+                type = "function",
+                function = new
+                {
+                    name = "make_torch",
+                    description = "Light a stick you're carrying from the burning fire pit, turning it into a torch — a personal light source. Burns out and turns back into a plain stick after a while; needs the fire pit lit again to relight.",
+                    parameters = new
+                    {
+                        type = "object",
+                        properties = new
+                        {
+                            emotion = new { type = "string", @enum = EmotionExtensions.AllValues, description = "how you're feeling right now" },
+                        },
+                        required = new[] { "emotion" },
+                    },
+                },
+            });
+        }
+
+        // Only offered while the fire pit IS lit and there's actual raw
+        // rabbit_meat on hand — see Food.cs's own header for why
+        // cooked_meat is worth the trouble (the most filling food in
+        // the game, and raw meat isn't edible at all otherwise).
+        if (targets.CookMeatAllowed)
+        {
+            tools.Add(new
+            {
+                type = "function",
+                function = new
+                {
+                    name = "cook_meat",
+                    description = "Cook raw rabbit meat you're carrying over the burning fire pit, turning it into cooked meat — restores far more health and hunger than raw meat (which isn't edible at all) when you eat it later, anytime, anywhere.",
+                    parameters = new
+                    {
+                        type = "object",
+                        properties = new
+                        {
+                            emotion = new { type = "string", @enum = EmotionExtensions.AllValues, description = "how you're feeling right now" },
+                        },
+                        required = new[] { "emotion" },
                     },
                 },
             });

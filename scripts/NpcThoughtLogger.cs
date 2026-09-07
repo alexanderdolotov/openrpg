@@ -24,6 +24,16 @@ public class NpcThoughtLogger
 
     public string LogPath => _logPath;
 
+    // The exact (npcId, kind, text) last written, so an immediate
+    // repeat (an animal re-logging "still fleeing the same wolf" every
+    // physics frame, say) doesn't fill this file with dozens of
+    // identical lines a second — see Log()'s own comment. Timestamp is
+    // deliberately excluded from the comparison (it always differs);
+    // this is about the CONTENT repeating, not the literal line.
+    private string _lastNpcId;
+    private string _lastKind;
+    private string _lastText;
+
     public NpcThoughtLogger(bool enabled)
     {
         _enabled = enabled;
@@ -43,6 +53,16 @@ public class NpcThoughtLogger
     {
         if (!_enabled)
             return;
+
+        // "If prev row is exact same, don't log it" — same collapsing
+        // rule Main.Log's console output gets, applied here too so the
+        // file doesn't fill up with the same repeat even when nobody's
+        // watching the live console at all.
+        if (npcId == _lastNpcId && kind == _lastKind && text == _lastText)
+            return;
+        _lastNpcId = npcId;
+        _lastKind = kind;
+        _lastText = text;
 
         try
         {

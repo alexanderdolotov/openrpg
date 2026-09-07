@@ -23,4 +23,14 @@ public static class SpeechLog
     // mechanics.
     public static List<(string SpeakerName, string Message)> Overheard(string listenerName, Vector2 listenerPosition) =>
         _buffer.Consume(listenerName, listenerPosition, HearingRadius);
+
+    // Called once at boot (Main._Ready(), alongside WorldEventLog's own
+    // and WorldExploration's) — static state like _buffer survives a
+    // "Restart Game" scene reload (autoloads and static classes both
+    // live outside the scene tree the reload actually tears down), so
+    // without this, a restarted session could briefly overhear a stale
+    // line from whoever happened to be speaking right before the old
+    // session ended, said by a "speaker" that no longer exists in the
+    // new one.
+    public static void Reset() => _buffer.Clear();
 }

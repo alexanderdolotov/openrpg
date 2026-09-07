@@ -15,6 +15,10 @@ public partial class Home : StaticBody2D, IInteractable, IHasVisualBounds, IObst
     private static readonly Vector2 WallSize = new(84, 84);
     private static readonly Color WallColor = new(0.55f, 0.35f, 0.2f);
     private static readonly Color RoofColor = new(0.42f, 0.2f, 0.15f);
+    private static readonly Color DoorColor = new(0.32f, 0.18f, 0.1f);
+    private static readonly Color DoorKnobColor = new(0.85f, 0.7f, 0.2f);
+    private static readonly Color WindowFrameColor = new(0.9f, 0.85f, 0.75f);
+    private static readonly Color WindowGlassColor = new(0.55f, 0.75f, 0.85f);
 
     // Collision matches the wall footprint only — the roof's overhang
     // is purely visual, no reason for it to physically block anything.
@@ -66,6 +70,21 @@ public partial class Home : StaticBody2D, IInteractable, IHasVisualBounds, IObst
             new(halfWidth, roofBase),
         };
         DrawColoredPolygon(roofPoints, RoofColor);
+
+        // Door: centered on the wall, sitting flush with the bottom edge.
+        Rect2 doorRect = new(-11f, wallRect.Position.Y + wallRect.Size.Y - 36f, 22f, 36f);
+        DrawRect(doorRect, DoorColor);
+        DrawCircle(new Vector2(doorRect.Position.X + doorRect.Size.X - 5f, doorRect.Position.Y + doorRect.Size.Y / 2f), 2f, DoorKnobColor);
+
+        // Window: off to one side, above door height, with a frame and
+        // a cross of muntins over the glass.
+        Rect2 windowFrame = new(wallRect.Position.X + 12f, wallRect.Position.Y + 14f, 22f, 22f);
+        DrawRect(windowFrame, WindowFrameColor);
+        Rect2 windowGlass = windowFrame.Grow(-3f);
+        DrawRect(windowGlass, WindowGlassColor);
+        Vector2 glassCenter = windowGlass.Position + windowGlass.Size / 2f;
+        DrawLine(new Vector2(glassCenter.X, windowGlass.Position.Y), new Vector2(glassCenter.X, windowGlass.Position.Y + windowGlass.Size.Y), WindowFrameColor, 1.5f);
+        DrawLine(new Vector2(windowGlass.Position.X, glassCenter.Y), new Vector2(windowGlass.Position.X + windowGlass.Size.X, glassCenter.Y), WindowFrameColor, 1.5f);
     }
 
     // One generic "deposit" rather than deposit_apple/deposit_fish/...

@@ -3,8 +3,10 @@ using Godot;
 // "Bears will prefer berries, unless starving, then will attack
 // anything." Priority: defend if attacked > full means never initiate
 // > berries first, always, while any are in reach > starving (and no
-// berries found) means attack whatever's nearest — human, wolf, or
-// rabbit, no preference among them.
+// berries found) means attack whatever's nearest it thinks it can
+// actually take (Animal.WinnableFight) — human, wolf, or rabbit, no
+// preference among them — or, once truly desperate, whatever's nearest
+// regardless of the odds.
 public partial class Bear : Animal
 {
     protected override float MoveSpeed => 55f; // slower than a wolf, but hits much harder
@@ -17,7 +19,8 @@ public partial class Bear : Animal
     public Bear() { Strength = 18; Dexterity = 7; MaxHealth = 70f; }
 
     private const float FullThreshold = 75f;
-    private const float StarvingThreshold = 20f;
+    private const float StarvingThreshold = 20f; // below this AND no berries found, attacks whatever's nearest it THINKS it can take (see WinnableFight) — rarely declines, being the strongest of the three species
+    private const float DesperateThreshold = 8f; // below THIS, no more sizing up at all
     private const float DefendWindow = 3f;
 
     // Drawn, not sprited — same reasoning as Rabbit's own header.
@@ -26,6 +29,7 @@ public partial class Bear : Animal
 
     public override void _Draw()
     {
+        DrawSetTransform(LungeOffset); // see Animal.PlayLunge's own header
         DrawCircle(new Vector2(1f, 2f), 17f, Body); // big, bulky body
         DrawCircle(new Vector2(-13f, -4f), 10f, Body); // head
         DrawCircle(new Vector2(-19f, -12f), 3.5f, Body); // ears
@@ -37,12 +41,17 @@ public partial class Bear : Animal
     {
         if (TimeSinceAttacked < DefendWindow && LastAttacker is Node2D attacker && IsInstanceValid(attacker))
         {
-            SetChaseOrAttack(attacker);
+            SetChaseOrAttack(attacker, "defending itself");
             return;
         }
 
+        // See Wolf's own identical check for the bug this fixes —
+        // IsCommittedToResting's header has the full reasoning.
+        if (IsCommittedToResting) return;
+
         if (Hunger >= FullThreshold)
         {
+            if (NeedsRest) { SetResting(); return; }
             _state = State.Wandering;
             return;
         }
@@ -67,14 +76,25 @@ public partial class Bear : Animal
 
         if (Hunger < StarvingThreshold)
         {
+            bool desperate = Hunger < DesperateThreshold;
+
+            string reason = desperate ? "desperate with hunger" : "starving, no berries nearby";
             NPCActor human = FindNearestHuman(DetectionRadius);
-            if (human != null) { SetChaseOrAttack(human); return; }
+            if (human != null && (desperate || WinnableFight(human))) { SetChaseOrAttack(human, reason); return; }
 
             Wolf wolf = FindNearestAnimal<Wolf>(DetectionRadius);
-            if (wolf != null) { SetChaseOrAttack(wolf); return; }
+            if (wolf != null && (desperate || WinnableFight(wolf))) { SetChaseOrAttack(wolf, reason); return; }
 
             Rabbit rabbit = FindNearestAnimal<Rabbit>(DetectionRadius);
-            if (rabbit != null) { SetChaseOrAttack(rabbit); return; }
+            if (rabbit != null) { SetChaseOrAttack(rabbit, reason); return; } // never a real fight either way — no size-up needed
+        }
+
+        // Nothing more urgent to do — rest instead of just wandering
+        // aimlessly if it's actually tired.
+        if (NeedsRest)
+        {
+            SetResting();
+            return;
         }
 
         _state = State.Wandering;

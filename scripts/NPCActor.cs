@@ -117,6 +117,18 @@ public partial class NPCActor : CharacterBody2D, ICombatant
     // to sit "just above the head" had to move up by the same amount or
     // it'd end up nearly touching the top of the head instead.
     private const float SpriteTopY = -SpriteScale * CharacterSpriteBuilder.FrameSize;
+
+    // Above the emotion emoji/speech bubble, out of their way — see
+    // VitalsBarDisplay's own header. Null for PlayerCharacter (see
+    // _Ready() below) — the player already has a full VitalsPanel on
+    // screen; a second copy floating over their own head would just be
+    // redundant clutter they can't easily see past their own sprite
+    // anyway. "Other NPC and animal stats," not the player's own.
+    private VitalsBarDisplay _vitalsBars;
+
+    // Same PlayerCharacter exemption as _vitalsBars above — set via
+    // SetDisplayName(), not here (see that method's own comment).
+    private Label _nameLabel;
     private Label _emotionLabel;
     private ulong _emotionToken; // same late-timer guard as _speechToken, see FlashEmotionEmoji()
     private PanelContainer _speechBubble;
@@ -187,12 +199,94 @@ public partial class NPCActor : CharacterBody2D, ICombatant
         _sprite.TextureFilter = TextureFilterEnum.Nearest; // keep pixel art crisp regardless of the texture's own import default
         AddChild(_sprite);
 
+        // Same shared radial gradient/warm tint as FirePit's own light
+        // — see RadialLightTexture's header. Modest radius: a torch is
+        // a personal light, not a second visibility light (that's
+        // PlayerCharacter.BuildVisibilityLight's job, and player-only).
+        // Every NPCActor gets one (universal, not player-only, the same
+        // "no hardcoded roles" reasoning as attack/eat/etc.) — hidden
+        // until an actual torch is burning.
+        _torchLight = new PointLight2D
+        {
+            Name = "TorchLight",
+            Texture = RadialLightTexture.Get(),
+            TextureScale = 260f / RadialLightTexture.Size, // ~130px radius
+            Color = new Color(1f, 0.6f, 0.3f),
+            Energy = 0.9f,
+            Visible = false,
+        };
+        AddChild(_torchLight);
+
+        // A held torch, drawn over the character sprite rather than
+        // baked into the sheet — see TorchIconTexture's header. Child of
+        // _sprite (not a sibling like _torchLight) so it rides along
+        // with every transform _sprite already gets — most notably the
+        // 90° "lying down" rotation Sleeping/Incapacitated use, which
+        // should carry the torch along with the body rather than leave
+        // it standing upright over a horizontal character. FlipH on the
+        // parent only mirrors the parent's own texture though, not a
+        // child's position, so UpdateSpriteFacing() mirrors
+        // TorchHandOffset by hand. Visibility follows _torchLight's, set
+        // wherever that is below — one hasTorch check driving both.
+        _torchSprite = new Sprite2D
+        {
+            Name = "TorchSprite",
+            Texture = TorchIconTexture.Get(),
+            Centered = false,
+            Offset = new Vector2(-TorchIconTexture.Width / 2f, -TorchIconTexture.Height),
+            Position = TorchHandOffset,
+            Visible = false,
+        };
+        _torchSprite.TextureFilter = TextureFilterEnum.Nearest;
+        _sprite.AddChild(_torchSprite);
+
         BuildEmotionLabel();
         BuildSpeechBubble();
         // Deliberately no initial flash here — showing Neutral the
         // moment a character spawns isn't a "mood change," it's just
         // the starting state; the emoji only appears once CurrentEmotion
         // actually changes to something.
+
+        // See _vitalsBars' own field comment for why PlayerCharacter
+        // skips this — `this is not PlayerCharacter`, not a virtual
+        // hook, since there's nothing else here any subclass needs to
+        // customize.
+        if (this is not PlayerCharacter)
+        {
+            _vitalsBars = new VitalsBarDisplay { Position = new Vector2(0f, SpriteTopY - 10f) };
+            AddChild(_vitalsBars);
+
+            // Text set later, by SetDisplayName() — NPCActor itself has
+            // no idea what its own name is (that's Personality.Name,
+            // owned by NpcAgent, not this tactical-layer class); the
+            // node still needs to exist now so NpcFactory has
+            // something to call into right after construction, same
+            // "configure after the fact" shape SetCharacterSprite()
+            // already uses for its own sprite variant.
+            _nameLabel = new Label { Position = new Vector2(0f, SpriteTopY - 40f) };
+            _nameLabel.AddThemeFontSizeOverride("font_size", 13);
+            _nameLabel.AddThemeColorOverride("font_color", new Color(0.95f, 0.95f, 0.85f));
+            _nameLabel.AddThemeColorOverride("font_outline_color", Colors.Black);
+            _nameLabel.AddThemeConstantOverride("outline_size", 3);
+            AddChild(_nameLabel);
+        }
+    }
+
+    // Called once by NpcFactory right after construction — see
+    // _nameLabel's own comment for why this can't just be known at
+    // _Ready() time. A no-op for PlayerCharacter (there's no label to
+    // set — nothing else calls this for the player anyway).
+    public void SetDisplayName(string name)
+    {
+        if (_nameLabel == null) return;
+        _nameLabel.Text = name;
+        // Re-centered now that the label has real text/width — Godot
+        // doesn't retroactively re-run HorizontalAlignment centering
+        // against the node's own origin the way a Control anchored in
+        // a container would; a bare Label positioned directly in
+        // world space just grows from its top-left corner, so this
+        // shifts it left by half its own measured width instead.
+        _nameLabel.Position = new Vector2(-_nameLabel.GetMinimumSize().X / 2f, _nameLabel.Position.Y);
     }
 
     private void BuildEmotionLabel()
@@ -301,11 +395,43 @@ public partial class NPCActor : CharacterBody2D, ICombatant
     }
 
     // The Health-side equivalent of CanSleep() — offered once Health
-    // starts actually dropping, not only once it's critical, and only
-    // when there's real food on hand to eat (Food.BestFoodIn already
-    // returns null otherwise, so this can't offer a dead-end choice).
+    // starts actually dropping, not only once it's critical, OR once
+    // Hunger itself is getting low (Vitals.NeedsFood — the more common,
+    // everyday reason to eat now that Hunger decays passively for
+    // everyone, same as Fatigue), and only when there's real food on
+    // hand to eat (Food.BestFoodIn already returns null otherwise, so
+    // this can't offer a dead-end choice).
     public const float EatHealthThreshold = 80f;
-    public bool CanEat() => Vitals.Health < EatHealthThreshold && Food.BestFoodIn(Inventory) != null;
+    public bool CanEat() => (Vitals.Health < EatHealthThreshold || Vitals.NeedsFood) && Food.BestFoodIn(Inventory) != null;
+
+    // "The torch should become a normal stick after 5min too — needs a
+    // fireplace to relight it again." A single shared burn-down timer
+    // per character, not per torch instance — Inventory only tracks
+    // item COUNTS, not individual item state, so this treats "how long
+    // until my torch(es) go out" as one clock this character is
+    // carrying, not something attached to any specific torch. Making a
+    // NEW torch while one's already burning (RefreshTorch, called from
+    // FirePit.TryInteract's "make_torch") just resets that shared
+    // clock back to full — a real simplification (a torch made near
+    // the end of the last one's burn arguably "should" get its own
+    // fresh 5 minutes, and in this model it effectively does, at the
+    // cost of any OTHER still-burning torch also resetting alongside
+    // it) rather than tracking N independent countdowns for what's, in
+    // practice, never going to be more than one or two at a time.
+    public const float TorchDuration = 300f; // 5 minutes, matching FirePit.LitDuration
+    private float _torchTimer;
+    private PointLight2D _torchLight;
+    private Sprite2D _torchSprite;
+
+    // Local to _sprite, in its own pre-scale pixel space (same space
+    // Offset above uses) — near the right hand of a character facing
+    // right; UpdateSpriteFacing() negates the X half when facing left.
+    // Y was originally -9 (mid-torso), but with the torch's own height
+    // added on top of that anchor, the flame landed up by the ear
+    // instead of a hand held at the side — lower anchor, same shape.
+    private static readonly Vector2 TorchHandOffset = new(6f, -4f);
+
+    public void RefreshTorch() => _torchTimer = TorchDuration;
 
     // --- ICombatant ---
     public int StrengthMod => Stats.StrengthMod;
@@ -370,23 +496,42 @@ public partial class NPCActor : CharacterBody2D, ICombatant
         }
 
         Vitals.Damage(amount);
-        if (!Vitals.IsIncapacitated)
-            return;
+        if (Vitals.IsIncapacitated)
+            HandleIncapacitation("incapacitated");
+    }
 
+    // The actual down-transition, shared by two very different
+    // triggers: a real hit (ReceiveDamage, above — Vitals.Damage
+    // brought Health to 0) and passive starvation (_PhysicsProcess,
+    // below — Vitals.DecayOverTime() drained it instead, once
+    // Vitals.IsStarving). Both end up in exactly the same place —
+    // knocked out (recoverable) or permanently down, depending on
+    // GameSettings.PermadeathEnabled — because Health hitting 0 means
+    // the same thing regardless of how it got there.
+    private void HandleIncapacitation(string reason)
+    {
         // Whatever was in progress needs to resolve/notify one way or
-        // another before this character goes down — either it was
-        // already interrupted above (Finish() already called,
-        // CurrentAction now null, nothing left to do here), or it was
-        // an exempted attack/flee still in flight when the killing
-        // blow landed, which still needs its own Finish() right here —
-        // skipping it would mean ActionCompleted never fires for that
-        // action at all, and NpcAgent's own turn loop (which only ever
-        // resumes via that signal) would silently stall forever
-        // waiting for a call that was never coming, the same class of
-        // bug already found and fixed in TakeTurn()'s own
-        // incapacitation wait loop.
+        // another before this character goes down. ReceiveDamage()
+        // already interrupted (and Finish()'d) anything peaceful, or a
+        // sleeping character, before calling this — so for a
+        // combat-caused incapacitation, this only ever still finds
+        // something left in CurrentAction when it was an exempted,
+        // still-in-flight attack/flee (see ReceiveDamage's own
+        // comment for why those are exempt from the earlier
+        // interrupt). Starvation reaches here directly from
+        // _PhysicsProcess, though, with NOTHING interrupted yet —
+        // including possibly still being asleep — so both cases are
+        // handled right here rather than assumed already done.
+        // Skipping this Finish() call would mean ActionCompleted never
+        // fires for whatever was in progress, and NpcAgent's own turn
+        // loop (which only ever resumes via that signal) would
+        // silently stall forever waiting for a call that was never
+        // coming — the same class of bug already found and fixed in
+        // TakeTurn()'s own incapacitation wait loop.
+        if (_state == State.Sleeping)
+            EndSleepVisual();
         if (CurrentAction != null)
-            Finish(false, "incapacitated");
+            Finish(false, reason);
 
         if (GameSettings.PermadeathEnabled)
         {
@@ -469,6 +614,12 @@ public partial class NPCActor : CharacterBody2D, ICombatant
 
         if (Mathf.Abs(Velocity.X) > 1f)
             _sprite.FlipH = Velocity.X < 0f;
+
+        // Keeps the torch on whichever hand faces outward — see
+        // TorchHandOffset's own comment for why this can't just ride
+        // along with _sprite.FlipH the way the body art does.
+        if (_torchSprite != null)
+            _torchSprite.Position = new Vector2(_sprite.FlipH ? -TorchHandOffset.X : TorchHandOffset.X, TorchHandOffset.Y);
 
         string wanted = Velocity.Length() > 1f ? "walk" : "idle";
         if (_sprite.Animation != wanted)
@@ -569,6 +720,81 @@ public partial class NPCActor : CharacterBody2D, ICombatant
         // only branches on input handling after.
         Vitals.DecayOverTime((float)delta);
         _timeSinceAttacked += (float)delta;
+        _vitalsBars?.Refresh(Vitals.Health / 100f, Vitals.Fatigue / 100f, Vitals.Hunger / 100f);
+
+        // Torch burn-down — see RefreshTorch's own comment for why
+        // this is one shared timer, not per-item. Counts down
+        // regardless of state (a torch burns whether you're gathering,
+        // walking, or asleep), and once it runs out, every "torch"
+        // currently held turns back into a plain "stick" — "needs a
+        // fireplace to relight it again," not just re-carry-able as a
+        // torch forever.
+        if (_torchLight != null)
+        {
+            // Tied to actually HOLDING a torch right now, not just to
+            // whoever originally crafted it — a real bug before this:
+            // _torchTimer used to keep counting down (and the light
+            // stayed on) for whoever lit it even after they traded it
+            // away, while whoever they gave it to got no light at all
+            // despite now actually carrying it. Inventory.Has() is the
+            // one source of truth for "do I have a torch," checked
+            // fresh every tick, not just at craft/trade time.
+            bool hasTorch = Inventory.Has("torch");
+            if (!hasTorch)
+            {
+                // Nothing to burn down — also covers "just traded it
+                // away," which is what makes the light turn off for
+                // the giver immediately, the same tick, rather than
+                // riding out whatever time was left on a timer that no
+                // longer means anything for them.
+                _torchTimer = 0f;
+                _torchLight.Visible = false;
+            }
+            else
+            {
+                // Carrying one with no countdown already running —
+                // either just received via trade/steal (the timer was
+                // never started for THIS character) or, in principle,
+                // some other way a torch ended up in Inventory without
+                // going through RefreshTorch(). Starts a fresh full
+                // burn rather than inheriting however much time the
+                // previous holder had left — Inventory only tracks
+                // item COUNTS, not per-item remaining time, so a
+                // traded torch can't carry its exact remaining burn
+                // with it; a fresh 5 minutes for the new holder is the
+                // honest simplification here, not a stale timer stuck
+                // at zero that would make it look permanently unlit.
+                if (_torchTimer <= 0f)
+                    _torchTimer = TorchDuration;
+
+                _torchTimer -= (float)delta;
+                _torchLight.Visible = true;
+                if (_torchTimer <= 0f)
+                {
+                    int burnedOut = Inventory.Count("torch");
+                    Inventory.Remove("torch", burnedOut);
+                    Inventory.Add("stick", burnedOut);
+                    _torchLight.Visible = false;
+                }
+            }
+
+            // One hasTorch check driving both — the light and the held-
+            // torch sprite always agree, since the sprite has no
+            // independent state of its own to fall out of sync from.
+            if (_torchSprite != null)
+                _torchSprite.Visible = _torchLight.Visible;
+        }
+
+        // Passive starvation can bring Health to 0 on its own, with no
+        // hit ever landing (DecayOverTime() above already applies
+        // StarvationDamagePerSecond once Vitals.IsStarving) — this is
+        // the other caller of HandleIncapacitation(), the one
+        // ReceiveDamage() doesn't cover. !IsDown guards against calling
+        // it again every single frame after the first, since Health
+        // just sits at 0 (not below) for as long as this keeps being
+        // true.
+        if (Vitals.IsIncapacitated && !IsDown)
+            HandleIncapacitation("starved");
 
         switch (_state)
         {
@@ -737,8 +963,9 @@ public partial class NPCActor : CharacterBody2D, ICombatant
                 return;
             }
             Inventory.Remove(food, 1);
+            Vitals.Hunger = Mathf.Min(100f, Vitals.Hunger + Food.HungerFor(food));
             Vitals.Health = Mathf.Min(100f, Vitals.Health + Food.HealthFor(food));
-            Finish(true, "ok", new Godot.Collections.Dictionary { { "item", food }, { "health", Vitals.Health } });
+            Finish(true, "ok", new Godot.Collections.Dictionary { { "item", food }, { "health", Vitals.Health }, { "hunger", Vitals.Hunger } });
             return;
         }
 
@@ -845,10 +1072,23 @@ public partial class NPCActor : CharacterBody2D, ICombatant
             }
             Combat.Result combatResult = Combat.Resolve(Stats.StrengthMod, Stats.DexterityMod, target.DexterityMod, Weapons.BestDamage(Inventory));
             var data = combatResult.Check.ToData("attack");
+
+            // Visual only — nothing here affects the roll or its
+            // result, just makes it readable on screen: a quick lunge
+            // toward whoever's being swung at, and a floating number
+            // (or "miss") above them a moment later, the same way the
+            // console log already shows this in text.
+            CombatVisuals.PlayLunge(_sprite, target.GlobalPosition);
+
             if (combatResult.Hit)
             {
                 target.ReceiveDamage(combatResult.Damage, this);
                 data["damage"] = combatResult.Damage;
+                CombatVisuals.ShowDamage(GetParent(), target.GlobalPosition, combatResult.Damage);
+            }
+            else
+            {
+                CombatVisuals.ShowMiss(GetParent(), target.GlobalPosition);
             }
             Finish(combatResult.Hit, combatResult.Hit ? "hit" : "missed", data);
             return;

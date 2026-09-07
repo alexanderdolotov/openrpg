@@ -56,10 +56,14 @@ public partial class PlayerCharacter : NPCActor, IWorldCharacter
     private Button _eatButton;
     private Button _pickUpStickButton;
     private Button _sleepButton;
+    private Button _lightFireButton;
+    private Button _makeTorchButton;
+    private Button _cookMeatButton;
     private Button[] _allButtons; // fixed panel order — also what number-key 1-9 indexes into, see _quickActions below
     private Label _activeActionLabel;
     private ProgressBar _healthBar;
     private ProgressBar _fatigueBar;
+    private ProgressBar _hungerBar;
     private Label _inventoryLabel;
 
     // Rebuilt every RefreshActionPanel() call — only the buttons that
@@ -82,6 +86,9 @@ public partial class PlayerCharacter : NPCActor, IWorldCharacter
     private GameAction _pickUpStickTarget;
     private static readonly GameAction SleepAction = new("sleep", "", 0f);
     private static readonly GameAction EatAction = new("eat", "", 0f);
+    private static readonly GameAction LightFireAction = new("light_fire", "firepit", ActionRanges.FirePit);
+    private static readonly GameAction MakeTorchAction = new("make_torch", "firepit", ActionRanges.FirePit);
+    private static readonly GameAction CookMeatAction = new("cook_meat", "firepit", ActionRanges.FirePit);
 
     // Same InventoryWatcher NpcAgent uses — no Memory to record into
     // here, so NoticeInventoryChanges() below just logs each note
@@ -111,6 +118,7 @@ public partial class PlayerCharacter : NPCActor, IWorldCharacter
 
         _healthBar = vitalsPanel.GetNode<ProgressBar>("HealthBar");
         _fatigueBar = vitalsPanel.GetNode<ProgressBar>("FatigueBar");
+        _hungerBar = vitalsPanel.GetNode<ProgressBar>("HungerBar");
         _inventoryLabel = vitalsPanel.GetNode<Label>("InventoryLabel");
 
         _activeActionLabel = actionPanel.GetNode<Label>("ActiveActionLabel");
@@ -127,7 +135,10 @@ public partial class PlayerCharacter : NPCActor, IWorldCharacter
         _eatButton = actionPanel.GetNode<Button>("EatButton");
         _pickUpStickButton = actionPanel.GetNode<Button>("PickUpStickButton");
         _sleepButton = actionPanel.GetNode<Button>("SleepButton");
-        _allButtons = new[] { _pickAppleButton, _catchFishButton, _gatherPineconeButton, _gatherBerryButton, _depositButton, _travelButton, _followButton, _tradeButton, _stealButton, _attackButton, _eatButton, _pickUpStickButton, _sleepButton };
+        _lightFireButton = actionPanel.GetNode<Button>("LightFireButton");
+        _makeTorchButton = actionPanel.GetNode<Button>("MakeTorchButton");
+        _cookMeatButton = actionPanel.GetNode<Button>("CookMeatButton");
+        _allButtons = new[] { _pickAppleButton, _catchFishButton, _gatherPineconeButton, _gatherBerryButton, _depositButton, _travelButton, _followButton, _tradeButton, _stealButton, _attackButton, _eatButton, _pickUpStickButton, _sleepButton, _lightFireButton, _makeTorchButton, _cookMeatButton };
 
         _pickAppleButton.Pressed += () => TryAssign(_pickAppleButton, _pickAppleTarget);
         _catchFishButton.Pressed += () => TryAssign(_catchFishButton, _catchFishTarget);
@@ -142,6 +153,9 @@ public partial class PlayerCharacter : NPCActor, IWorldCharacter
         _eatButton.Pressed += () => TryAssign(_eatButton, EatAction);
         _pickUpStickButton.Pressed += () => TryAssign(_pickUpStickButton, _pickUpStickTarget);
         _sleepButton.Pressed += () => TryAssign(_sleepButton, SleepAction);
+        _lightFireButton.Pressed += () => TryAssign(_lightFireButton, LightFireAction);
+        _makeTorchButton.Pressed += () => TryAssign(_makeTorchButton, MakeTorchAction);
+        _cookMeatButton.Pressed += () => TryAssign(_cookMeatButton, CookMeatAction);
 
         ActionCompleted += OnMyActionCompleted;
         _inventoryWatcher.AbsorbOwnChange(Inventory);
@@ -224,8 +238,8 @@ public partial class PlayerCharacter : NPCActor, IWorldCharacter
         var light = new PointLight2D
         {
             Name = "VisibilityLight",
-            Texture = VisibilityLightTexture(),
-            TextureScale = (radius * 2f) / LightTextureSize,
+            Texture = RadialLightTexture.Get(),
+            TextureScale = (radius * 2f) / RadialLightTexture.Size,
             // The texture is fully opaque at its own center, so Energy
             // is the ONLY thing standing between "brightened back to
             // normal" and "blown out" right where the player stands —
@@ -238,34 +252,6 @@ public partial class PlayerCharacter : NPCActor, IWorldCharacter
         AddChild(light);
     }
 
-    // Built in code, not loaded from a file — a plain white-to-
-    // transparent radial gradient is all a soft circular light needs,
-    // and generating it avoids adding an asset file for something this
-    // simple. Shared/cached the same way CharacterSpriteBuilder's sheet
-    // is, so a second PlayerCharacter later reuses the same texture
-    // rather than building its own copy.
-    private const int LightTextureSize = 256;
-    private static Texture2D _visibilityLightTexture;
-    private static Texture2D VisibilityLightTexture()
-    {
-        if (_visibilityLightTexture != null)
-            return _visibilityLightTexture;
-
-        var gradient = new Gradient();
-        gradient.SetColor(0, Colors.White);
-        gradient.SetColor(1, new Color(1f, 1f, 1f, 0f));
-
-        _visibilityLightTexture = new GradientTexture2D
-        {
-            Gradient = gradient,
-            Width = LightTextureSize,
-            Height = LightTextureSize,
-            Fill = GradientTexture2D.FillEnum.Radial,
-            FillFrom = new Vector2(0.5f, 0.5f),
-            FillTo = new Vector2(1f, 0.5f),
-        };
-        return _visibilityLightTexture;
-    }
 
     private void TryAssign(Button sourceButton, GameAction action)
     {
@@ -315,6 +301,23 @@ public partial class PlayerCharacter : NPCActor, IWorldCharacter
         // after it whenever the player IS idle.
         base._PhysicsProcess(delta);
 
+        // Unconditional, NOT gated on being Idle — a real bug before
+        // this: RefreshVitalsPanel()/NoticeInventoryChanges() used to
+        // live inside RefreshActionPanel() below, which only ever runs
+        // in the Idle branch, so a hit landing mid-fight (Attempting,
+        // not Idle) never touched the Health bar at all — it just sat
+        // frozen at whatever it read the last time the player happened
+        // to be standing still, even while Vitals.Health was actively
+        // dropping underneath it. The action PANEL genuinely should
+        // stay exactly as EnterActiveMode() left it until back to Idle
+        // (see that method's own comment) — but the vitals readout and
+        // "did someone just take/give me something" check have no
+        // reason to share that gate, and every reason not to: both need
+        // to reflect what's actually happening in real time, including
+        // (especially) mid-fight.
+        RefreshVitalsPanel();
+        NoticeInventoryChanges();
+
         if (_state != State.Idle)
             return; // panel stays exactly as EnterActiveMode() left it until back to Idle — see that method's comment
 
@@ -332,6 +335,36 @@ public partial class PlayerCharacter : NPCActor, IWorldCharacter
             if (Input.IsKeyPressed(_keys.Right) || Input.IsKeyPressed(_keys.RightAlt)) direction.X += 1f;
             if (Input.IsKeyPressed(_keys.Up) || Input.IsKeyPressed(_keys.UpAlt)) direction.Y -= 1f;
             if (Input.IsKeyPressed(_keys.Down) || Input.IsKeyPressed(_keys.DownAlt)) direction.Y += 1f;
+
+            // Automatic self-defense — "once combat starts, I don't
+            // need to keep pressing to attack." Fires only when the
+            // player isn't actively trying to move: holding a
+            // direction reads as "let me run instead," the player's
+            // own choice to flee taking priority over fighting back
+            // automatically. An NPC gets an actual LLM-driven fight/
+            // flee/freeze decision for this same moment (see
+            // NpcAgent's own DetectThreatSituation/HandleThreatTurn);
+            // the player doesn't need one — manual WASD control
+            // already IS their own flee-or-not decision, made fresh
+            // every single frame, same as it always has been. This
+            // only ever engages something already IN melee range and
+            // actively hostile toward the player specifically — it
+            // never walks the player into a fight on its own.
+            if (direction == Vector2.Zero)
+            {
+                Animal threat = NearestHostileAnimal(ActionRanges.Attack);
+                if (threat != null)
+                {
+                    AssignAction(new GameAction("attack", threat.WorldId, ActionRanges.Attack));
+                    // Same "doing it" panel treatment TryAssign() gives
+                    // a manually-clicked button — otherwise the UI
+                    // would sit there looking idle while the player is
+                    // actually mid-fight.
+                    EnterActiveMode($"Attack {SpeciesName(threat)}");
+                    return; // no longer Idle — the rest of this frame's idle branch (movement, panel refresh) doesn't apply anymore
+                }
+            }
+
             Velocity = direction.Normalized() * FreeMoveSpeed;
             MoveAndSlide();
         }
@@ -407,10 +440,16 @@ public partial class PlayerCharacter : NPCActor, IWorldCharacter
         _tradeButton.Visible = _tradeTarget != null;
 
         // You don't know what's in someone else's pockets any more than
-        // an NPC does — the button always offers "apple" as the guess,
-        // same blind gamble, not a hint about what they're carrying.
+        // an NPC does — the button rolls a random guess from
+        // Mind.ItemTypes, the same pool an NPC's own steal tool-call
+        // picks from, re-rolled fresh every panel refresh (this runs
+        // every idle physics frame) so a wrong guess isn't stuck
+        // forever — just walk up and click again for a fresh gamble.
+        // Still not a hint about what they're actually carrying.
         IWorldCharacter stealTarget = NearestOtherCharacter(ActionRanges.Steal);
-        _stealTarget = stealTarget != null ? new GameAction("steal", stealTarget.DisplayName, ActionRanges.Steal, item: "apple", amount: 1) : null;
+        _stealTarget = stealTarget != null
+            ? new GameAction("steal", stealTarget.DisplayName, ActionRanges.Steal, item: Mind.ItemTypes[Dice.Roll(Mind.ItemTypes.Length) - 1], amount: 1)
+            : null;
         if (_stealTarget != null) _stealButton.Text = $"Steal from {stealTarget.DisplayName}";
         _stealButton.Visible = _stealTarget != null;
 
@@ -435,6 +474,17 @@ public partial class PlayerCharacter : NPCActor, IWorldCharacter
         _sleepButton.Visible = CanSleep(_world.Home.GlobalPosition);
         _sleepButton.Text = Vitals.NeedsSleep ? "Sleep (exhausted)" : "Sleep";
 
+        // Distance-gated like every other button here (deposit, attack,
+        // ...) — unlike the LLM's own tool schema, where light_fire/
+        // make_torch are always offered and AssignAction() handles
+        // walking there (see NpcAgent's own comment on that), a button
+        // only makes sense to show once the player's actually close
+        // enough to use it right now.
+        bool nearFirePit = GlobalPosition.DistanceTo(_world.FirePit.GlobalPosition) <= ActionRanges.FirePit;
+        _lightFireButton.Visible = nearFirePit && !_world.FirePit.IsLit;
+        _makeTorchButton.Visible = nearFirePit && _world.FirePit.IsLit && Inventory.Has("stick");
+        _cookMeatButton.Visible = nearFirePit && _world.FirePit.IsLit && Inventory.Has("rabbit_meat");
+
         // Same panel order every time — this is what makes "press 1"
         // through "press 9" match "the buttons, top to bottom, skipping
         // whichever aren't showing right now" rather than needing its
@@ -455,6 +505,9 @@ public partial class PlayerCharacter : NPCActor, IWorldCharacter
             (_eatButton, _eatButton.Visible ? EatAction : null),
             (_pickUpStickButton, _pickUpStickTarget),
             (_sleepButton, _sleepButton.Visible ? SleepAction : null),
+            (_lightFireButton, _lightFireButton.Visible ? LightFireAction : null),
+            (_makeTorchButton, _makeTorchButton.Visible ? MakeTorchAction : null),
+            (_cookMeatButton, _cookMeatButton.Visible ? CookMeatAction : null),
         };
         foreach ((Button button, GameAction action) in candidates)
             if (action != null)
@@ -474,8 +527,6 @@ public partial class PlayerCharacter : NPCActor, IWorldCharacter
             button.Text = $"{i + 1}. {clean}";
         }
 
-        RefreshVitalsPanel();
-        NoticeInventoryChanges();
     }
 
     // An NPC gets its own condition read out in plain text every turn
@@ -489,10 +540,13 @@ public partial class PlayerCharacter : NPCActor, IWorldCharacter
     {
         _healthBar.Value = Vitals.Health;
         _fatigueBar.Value = Vitals.Fatigue;
+        _hungerBar.Value = Vitals.Hunger;
         // Same red flag NeedsSleep already drives on the Sleep button's
         // text — here as a color instead of a word, so it's visible at
-        // a glance without reading the bar's number.
+        // a glance without reading the bar's number. NeedsFood gets the
+        // identical treatment on the Hunger bar.
         _fatigueBar.Modulate = Vitals.NeedsSleep ? new Color(0.9f, 0.35f, 0.3f) : Colors.White;
+        _hungerBar.Modulate = Vitals.NeedsFood ? new Color(0.9f, 0.35f, 0.3f) : Colors.White;
         _inventoryLabel.Text = DescribeInventory();
     }
 
@@ -505,6 +559,7 @@ public partial class PlayerCharacter : NPCActor, IWorldCharacter
     {
         { "apple", "🍎" }, { "fish", "🐟" }, { "pinecone", "🌲" },
         { "blueberry", "🫐" }, { "blackberry", "🍇" }, { "raspberry", "🍓" },
+        { "rabbit_meat", "🥩" }, { "fur", "🧶" }, { "torch", "🔥" }, { "cooked_meat", "🍖" },
     };
 
     private string DescribeInventory()
@@ -563,6 +618,28 @@ public partial class PlayerCharacter : NPCActor, IWorldCharacter
         return best;
     }
 
+    // NearestAnimal's own hostile-only cousin — used only by automatic
+    // self-defense (see _PhysicsProcess), not the Attack button (which
+    // deliberately lets the player pick a fight with anything nearby,
+    // hostile or not — see NearestAnimal's own callers). This one
+    // specifically means "something is actively attacking or chasing
+    // ME right now," the same check NpcAgent's own
+    // DetectThreatSituation() makes for an NPC's self-defense case.
+    private Animal NearestHostileAnimal(float range)
+    {
+        Animal best = null;
+        float bestDist = float.MaxValue;
+        foreach (Animal a in _world.Animals)
+        {
+            if (a.IsDown) continue;
+            if (a.CurrentState != Animal.State.Attacking && a.CurrentState != Animal.State.Chasing) continue;
+            if (!ReferenceEquals(a.CurrentTarget, this)) continue;
+            float d = GlobalPosition.DistanceTo(a.GlobalPosition);
+            if (d <= range && d < bestDist) { bestDist = d; best = a; }
+        }
+        return best;
+    }
+
     private Stick NearestStick(float range)
     {
         Stick best = null;
@@ -603,6 +680,9 @@ public partial class PlayerCharacter : NPCActor, IWorldCharacter
             "eat" => $"{DisplayName} eats something to recover.",
             "pick_up_stick" => $"{DisplayName} picks up a stick.",
             "sleep" => $"{DisplayName} was asleep nearby for a while.",
+            "light_fire" => $"{DisplayName} lights the fire pit.",
+            "make_torch" => $"{DisplayName} lights a torch from the fire.",
+            "cook_meat" => $"{DisplayName} cooks some meat over the fire.",
             _ => null,
         };
         if (description != null)

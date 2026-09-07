@@ -23,6 +23,18 @@ public static class WorldExploration
 
     private static readonly HashSet<(int, int)> _exploredRegions = new();
 
+    // Called once at boot (Main._Ready(), before MarkExplored() below)
+    // — a real bug, found auditing after the "Restart Game" button
+    // existed to actually trigger it: this is static, so it survives a
+    // scene reload (the reload only tears down the scene tree; static
+    // class state lives outside that entirely) — without this, a
+    // restarted session would inherit every region the PREVIOUS
+    // session ever explored, and every one of those regions would then
+    // never generate anything in the new session (DiscoverAhead() only
+    // ever yields a region the first time it's added, forever), even
+    // though the new session's world is otherwise completely fresh.
+    public static void Reset() => _exploredRegions.Clear();
+
     private static (int, int) RegionOf(Vector2 position) =>
         (Mathf.FloorToInt(position.X / RegionSize), Mathf.FloorToInt(position.Y / RegionSize));
 
