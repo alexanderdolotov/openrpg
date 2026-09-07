@@ -412,12 +412,16 @@ public partial class NpcAgent : Node, IWorldCharacter
         var result = await Mind.Decide(perception, targets, Personality);
         _thinking = false;
 
-        if (!result.Ok && _pureLlmMode)
+        if (!result.Ok && _pureLlmMode && !IsToolCallFailure(result.Error))
         {
-            // Pure LLM mode: no substitute action, ever. Stand still and
-            // retry rather than let a fallback quietly stand in for a
-            // decision — the whole point of this mode is that every
-            // action seen genuinely came from the model.
+            // Pure LLM mode: a genuinely UNREACHABLE backend gets no
+            // substitute action, ever — stand still and retry rather
+            // than let a fallback quietly stand in for a decision
+            // nothing ever actually got a chance to make. A tool-call
+            // failure (the model DID respond, it just didn't produce a
+            // usable call) is handled in the else-branch below instead
+            // — see IsToolCallFailure's own header for why that's a
+            // different situation.
             _uiLog($"[{Personality.Name}] mind unreachable ({result.Error}) -> retrying in {RetryDelaySeconds:0}s (fallback disabled)", "e0c66a");
             _thoughtLog.Log(Personality.Name, "FALLBACK_DISABLED", result.Error);
             // processAlways:false — this timer (and every other one an
@@ -445,6 +449,20 @@ public partial class NpcAgent : Node, IWorldCharacter
                 Memory.Record("thought", result.Thought);
                 _thoughtLog.Log(Personality.Name, "THOUGHT", result.Thought);
             }
+        }
+        else if (IsToolCallFailure(result.Error))
+        {
+            // "Allow fallback if the LLM tool call fails — but declare
+            // it in terminal so I know why." Distinct wording and a
+            // distinct thought-log kind from the "mind unreachable"
+            // case right below, on purpose — this is the model
+            // responding but failing to produce a usable tool call
+            // (bad/missing JSON, an off-menu action, an invalid
+            // target), not the backend being down, and now falls back
+            // even under PureLlmMode (see the guard above).
+            _uiLog($"[{Personality.Name}] LLM tool call failed ({result.Error}) -> random fallback", "e0c66a");
+            _thoughtLog.Log(Personality.Name, "TOOL_CALL_FAILED", result.Error);
+            action = RandomFallback();
         }
         else
         {
@@ -486,13 +504,12 @@ public partial class NpcAgent : Node, IWorldCharacter
         Mind.MindResult result = await Mind.DecidePlayerRequest(perception, targets, Personality);
         _thinking = false;
 
-        if (!result.Ok && _pureLlmMode)
+        if (!result.Ok && _pureLlmMode && !IsToolCallFailure(result.Error))
         {
-            // Same "no substitute action, ever" posture pure LLM mode
-            // takes for the normal turn above — a canned decline would
-            // be a scripted stand-in for a decision the model never
-            // actually made, which is exactly what this mode exists to
-            // rule out. Retry shortly instead.
+            // Same "genuinely unreachable backend, no substitute, ever"
+            // posture pure LLM mode takes for the normal turn above — a
+            // tool-call failure (the model DID respond) is handled in
+            // the else-branch below instead, same reasoning as there.
             _uiLog($"[{Personality.Name}] mind unreachable ({result.Error}) -> retrying in {RetryDelaySeconds:0}s (fallback disabled)", "e0c66a");
             _thoughtLog.Log(Personality.Name, "FALLBACK_DISABLED", result.Error);
             await Actor.ToSignal(Actor.GetTree().CreateTimer(RetryDelaySeconds, processAlways: false), SceneTreeTimer.SignalName.Timeout);
@@ -517,6 +534,16 @@ public partial class NpcAgent : Node, IWorldCharacter
                 Memory.Record("emotion", action.Emotion.Value.ToWireString());
                 _thoughtLog.Log(Personality.Name, "EMOTION", action.Emotion.Value.ToWireString());
             }
+        }
+        else if (IsToolCallFailure(result.Error))
+        {
+            // The model responded but never produced a usable tool call
+            // for this direct question/request (see IsToolCallFailure) —
+            // still owed a real, in-character reply rather than dead
+            // air, just not one that commits to actually doing anything.
+            action = new GameAction("speak", "", 0f, message: "Sorry, give me a moment.");
+            _uiLog($"[{Personality.Name}] LLM tool call failed during player request ({result.Error}) -> random fallback", "e0c66a");
+            _thoughtLog.Log(Personality.Name, "TOOL_CALL_FAILED", result.Error);
         }
         else
         {
@@ -791,8 +818,14 @@ public partial class NpcAgent : Node, IWorldCharacter
         }
         else
         {
+            // Always falls back here regardless of PureLlmMode (no
+            // guard to check, unlike the two decision paths above) —
+            // danger doesn't wait on a retry. Still worth telling apart
+            // WHY, same as those two: a tool-call failure means the
+            // model responded but didn't produce a usable choice.
             choice = RandomThreatFallback(threats, selfTargeted);
-            _uiLog($"[{Personality.Name}] mind unreachable during danger ({result.Error}) -> random: {choice}", "e0c66a");
+            string reason = IsToolCallFailure(result.Error) ? "LLM tool call failed" : "mind unreachable";
+            _uiLog($"[{Personality.Name}] {reason} during danger ({result.Error}) -> random: {choice}", "e0c66a");
             _thoughtLog.Log(Personality.Name, "THREAT_FALLBACK", $"{result.Error} -> {choice}");
         }
 
@@ -1314,14 +1347,32 @@ public partial class NpcAgent : Node, IWorldCharacter
         return $"near {nearest} ({(int)bestDist}px away)";
     }
 
-    // Used only when the mind is unreachable — not personality-aware on
-    // purpose, since a network fallback isn't a real decision. Rather
-    // than a fixed priority order, it picks randomly among whatever's
-    // actually valid right now (never a nonsensical option, like
-    // depositing nothing or picking an empty tree). Deliberately never
-    // picks speak/travel/follow/trade/steal — a network outage isn't a
-    // social or exploratory impulse, it's a fallback for the core
-    // resource loop.
+    // True for a "the model responded, but never produced a usable
+    // tool call this attempt" failure (Mind.ParseToolCall's own
+    // no_tool_call / malformed_tool_call / unknown_action_X /
+    // invalid_target_X) — as opposed to a genuine think_/act_-prefixed
+    // network/provider failure (the backend itself never answered; see
+    // Mind.Decide/DecidePlayerRequest/DecideThreatResponse, which are
+    // the only things that ever produce either prefix). The distinction
+    // is what "allow fallback if the LLM tool call fails, but tell me
+    // why" actually means: under PureLlmMode a real connectivity
+    // failure still retries forever below (there's nothing anywhere
+    // else to substitute for a decision the model never got the chance
+    // to make), but a tool-call failure is a per-attempt quality issue
+    // on a backend that's demonstrably still reachable — falling back
+    // and clearly labeling it keeps that one NPC's turn loop moving
+    // instead of stalling it indefinitely on a live connection.
+    private static bool IsToolCallFailure(string error) =>
+        error != null && !error.StartsWith("think_") && !error.StartsWith("act_");
+
+    // Used only when the mind is unreachable OR fails to produce a
+    // usable tool call — not personality-aware on purpose, since a
+    // fallback isn't a real decision. Rather than a fixed priority
+    // order, it picks randomly among whatever's actually valid right
+    // now (never a nonsensical option, like depositing nothing or
+    // picking an empty tree). Deliberately never picks speak/travel/
+    // follow/trade/steal — this isn't a social or exploratory impulse,
+    // it's a fallback for the core resource loop.
     private GameAction RandomFallback()
     {
         // A physical need, not a social or exploratory impulse — checked

@@ -16,11 +16,20 @@ public class MindConfig
     [JsonPropertyName("api_key")] public string ApiKey { get; set; } = "";
     [JsonPropertyName("log_npc_thoughts")] public bool LogNpcThoughts { get; set; } = false;
 
-    // When true, NpcAgent.RandomFallback() never runs — a failed
-    // decision retries instead of substituting a fallback action, so
-    // every action taken genuinely came from the LLM. Off by default
-    // since that's what a shippable game wants (never stall on a
-    // network hiccup); on for testing "does the LLM alone hold up."
+    // When true, a genuinely UNREACHABLE backend (the network/provider
+    // call itself failing) retries instead of ever substituting
+    // RandomFallback() — every action taken under a live connection
+    // genuinely came from the LLM. Off by default since that's what a
+    // shippable game wants (never stall on a network hiccup); on for
+    // testing "does the LLM alone hold up." Does NOT block a fallback
+    // for the model responding but failing to produce a usable tool
+    // call (bad JSON, an off-menu action, an invalid target) — that's
+    // a live, reachable backend having an off attempt, not the
+    // connection being down, so it falls back either way (clearly
+    // logged as "LLM tool call failed", distinct from "mind
+    // unreachable") rather than stalling an NPC indefinitely on a
+    // connection that's demonstrably still up. See NpcAgent.
+    // IsToolCallFailure for the actual think_/act_-prefix distinction.
     [JsonPropertyName("pure_llm_mode")] public bool PureLlmMode { get; set; } = false;
 
     // See GameSettings.PermadeathEnabled for what this actually

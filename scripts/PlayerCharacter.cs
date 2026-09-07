@@ -559,7 +559,7 @@ public partial class PlayerCharacter : NPCActor, IWorldCharacter
     {
         { "apple", "🍎" }, { "fish", "🐟" }, { "pinecone", "🌲" },
         { "blueberry", "🫐" }, { "blackberry", "🍇" }, { "raspberry", "🍓" },
-        { "rabbit_meat", "🥩" }, { "fur", "🧶" }, { "torch", "🔥" }, { "cooked_meat", "🍖" },
+        { "stick", "🥢" }, { "rabbit_meat", "🥩" }, { "fur", "🧶" }, { "torch", "🔥" }, { "cooked_meat", "🍖" },
     };
 
     private string DescribeInventory()

@@ -1092,7 +1092,25 @@ public partial class Main : Node2D
     // on. RemoveParagraph(0) trims old lines the same way _logLines used
     // to (each Log() call is one paragraph), without ever touching Text
     // as a whole.
-    private const int MaxLogLines = 40;
+    // Was 40 — far too short once filtering could hide a chunk of the
+    // stream for a while ("I hope once the filter is removed I can
+    // read missed events... it should just be a UI filter, not
+    // actually throw away output"): 40 lines shared across the world
+    // plus every NPC's own thinking/speaking/acting was only a couple
+    // turns' worth, so anything before that was already gone by the
+    // time you'd want to look back at it, filter or no filter. This is
+    // just what the visible RichTextLabel itself keeps as paragraphs
+    // (a real render/scroll cost, so still bounded) — MaxLogHistoryLines
+    // below is the much bigger cap on what's actually remembered.
+    private const int MaxVisibleLogLines = 300;
+
+    // The real backing memory for everything logged, filtered out of
+    // the current view or not — see _logHistory's own header. Plain
+    // (Speaker, Text, Color) structs, not rendered anywhere until
+    // RebuildDebugLogDisplay walks them, so this can afford to hold a
+    // lot more than MaxVisibleLogLines without costing anything until
+    // someone actually toggles a filter or scrolls back.
+    private const int MaxLogHistoryLines = 2000;
 
     // Explicit, not scroll_follow (Main.tscn had that on originally,
     // now off) — scroll_follow's own "was I already at the bottom"
@@ -1124,11 +1142,15 @@ public partial class Main : Node2D
     private string _lastLoggedLine;
     private string _lastLoggedColor;
 
-    // Everything ever logged, bounded to the same MaxLogLines cap the
-    // visible RichTextLabel itself enforces — kept independently of
-    // what's currently on screen so a filter toggle can rebuild the
-    // visible view from real history, not just start filtering
-    // whatever gets logged from that point on. See SetActiveLogFilter/
+    // Everything ever logged, bounded to MaxLogHistoryLines — kept
+    // independently of what's currently on screen (and of
+    // MaxVisibleLogLines, the much smaller cap on the RichTextLabel's
+    // own paragraphs) so a filter toggle can rebuild the visible view
+    // from real history, not just start filtering whatever gets logged
+    // from that point on: this is what makes filtering purely a VIEW
+    // over the log, never an actual loss of anything logged while it
+    // was active — clear the filter and everything that happened while
+    // it was on is still right there. See SetActiveLogFilter/
     // RebuildDebugLogDisplay.
     private struct LogLine
     {
@@ -1174,7 +1196,7 @@ public partial class Main : Node2D
             safe = safe.Substring(0, 197) + "...";
 
         _logHistory.Add(new LogLine { Speaker = speaker, Text = safe, Color = color });
-        while (_logHistory.Count > MaxLogLines)
+        while (_logHistory.Count > MaxLogHistoryLines)
             _logHistory.RemoveAt(0);
 
         // Filtered out of the live view right now — still recorded
@@ -1206,7 +1228,7 @@ public partial class Main : Node2D
         bool wasAtBottom = scrollBar == null || scrollBar.Value >= scrollBar.MaxValue - scrollBar.Page - 1.0;
 
         _debugLog.AppendText($"[color=#{color}]{safe}[/color]\n");
-        while (_debugLog.GetParagraphCount() > MaxLogLines)
+        while (_debugLog.GetParagraphCount() > MaxVisibleLogLines)
             _debugLog.RemoveParagraph(0);
 
         // ScrollToLine(), not scrollBar.Value = scrollBar.MaxValue —
@@ -1224,16 +1246,27 @@ public partial class Main : Node2D
     // Full re-render of the visible log from _logHistory under whatever
     // _activeLogFilter is now set to — the only way a filter toggle can
     // affect lines already on screen, not just new ones from this point
-    // forward. Always ends scrolled to the bottom of whatever's now
-    // showing, same as a live Log() call would.
+    // forward. Capped to the most recent MaxVisibleLogLines MATCHING
+    // entries (not all up to MaxLogHistoryLines) so this renders the
+    // same amount of content a live, unfiltered Log() stream would —
+    // clearing a filter shows a full screen of Everyone's recent
+    // activity again, not a sudden wall of thousands of lines. Always
+    // ends scrolled to the bottom of whatever's now showing, same as a
+    // live Log() call would.
     private void RebuildDebugLogDisplay()
     {
-        _debugLog.Clear();
-        foreach (LogLine entry in _logHistory)
+        var visible = new List<LogLine>(MaxVisibleLogLines);
+        for (int i = _logHistory.Count - 1; i >= 0 && visible.Count < MaxVisibleLogLines; i--)
         {
+            LogLine entry = _logHistory[i];
             if (_activeLogFilter == null || entry.Speaker == _activeLogFilter)
-                _debugLog.AppendText($"[color=#{entry.Color}]{entry.Text}[/color]\n");
+                visible.Add(entry);
         }
+        visible.Reverse();
+
+        _debugLog.Clear();
+        foreach (LogLine entry in visible)
+            _debugLog.AppendText($"[color=#{entry.Color}]{entry.Text}[/color]\n");
         _debugLog.ScrollToLine(_debugLog.GetLineCount());
     }
 
