@@ -521,6 +521,37 @@ public partial class NpcAgent : Node, IWorldCharacter
         if (result.Ok)
         {
             action = result.Action;
+
+            // "Nobody decided to make torches even though I gave them
+            // sticks — better tool calling, and fall back on regex to
+            // parse out intent if possible." A real, observed case:
+            // the model called speak — a genuinely successful tool
+            // call, not a parse failure — but the line itself was "I'm
+            // not sure about making torches... but maybe I could use
+            // it to make one?", reasoning its way to the right action
+            // in WORDS without ever calling it. Only tried when the
+            // model's own decision was speak, and only for this
+            // direct-request path specifically — an ordinary turn's own
+            // speak is a real, standalone choice (small talk, a
+            // greeting, anything), not implicitly "the model meant to
+            // do something else instead"; a direct request is the one
+            // place "actually commit to a real answer this turn" is the
+            // whole point (see Mind.TryRecoverCommittedAction/
+            // PlayerRequestInstruction). Hedged language ("maybe",
+            // trailing "?", ...) correctly recovers nothing — see
+            // MatchesIntent — so this only overrides a genuine,
+            // unhedged commitment sitting right there in what was said.
+            if (action.Id == "speak" && !string.IsNullOrEmpty(action.Message))
+            {
+                GameAction recovered = Mind.TryRecoverCommittedAction(action.Message, targets);
+                if (recovered != null && recovered.Id != "speak")
+                {
+                    _uiLog($"[{Personality.Name}] said \"{action.Message}\" — reads as actually committing to {recovered.Id}{(recovered.TargetId != "" ? $" -> {recovered.TargetId}" : "")}, doing that instead", "e0c66a");
+                    _thoughtLog.Log(Personality.Name, "SPEAK_RECOVERED_ACTION", $"{action.Message} -> {recovered.Id}{(recovered.TargetId != "" ? $" -> {recovered.TargetId}" : "")}");
+                    action = recovered;
+                }
+            }
+
             _uiLog($"[{Personality.Name}] decides (player request): {action.Id}{(action.TargetId != "" ? $" -> {action.TargetId}" : "")}", "a9c9e8");
             _thoughtLog.Log(Personality.Name, "PLAYER_REQUEST_DECISION", $"{action.Id}{(action.TargetId != "" ? $" -> {action.TargetId}" : "")}");
             // Same emotion bookkeeping the normal turn does right after
@@ -1225,10 +1256,20 @@ public partial class NpcAgent : Node, IWorldCharacter
         int homeDist = (int)Actor.GlobalPosition.DistanceTo(_world.Home.GlobalPosition);
         lines.Add($"home: {homeDist} px away, {_world.Home.ApplesStored} apples and {_world.Home.FishStored} fish stored there so far");
 
+        // "Someone asked for help lighting the fire, and Maren said
+        // yes... then never actually called light_fire, inventing a
+        // 'check if it needs fuel first' excuse instead and just kept
+        // talking about it turn after turn." light_fire genuinely needs
+        // NOTHING else — no stick, no fuel, nothing in Inventory at all
+        // (see FirePit.TryInteract's own "light_fire" case) — the old,
+        // shorter unlit line here never said that explicitly, leaving
+        // room for a small model to assume some prerequisite that
+        // doesn't exist in this game at all rather than just walking up
+        // and lighting it.
         int firePitDist = (int)Actor.GlobalPosition.DistanceTo(_world.FirePit.GlobalPosition);
         lines.Add(_world.FirePit.IsLit
             ? $"fire pit: {firePitDist} px away, near home, burning right now — a stick can be lit from it to make a torch, and raw rabbit meat can be cooked over it."
-            : $"fire pit: {firePitDist} px away, near home, not lit right now.");
+            : $"fire pit: {firePitDist} px away, near home, not lit right now — nothing is needed to light it, no stick or fuel or anything else required, just walk up and light it with the light_fire action whenever you want a fire going.");
 
         // Known vs heuristic-only: a flagpole the NPC has actually
         // reached before gets described plainly; one it's only ever

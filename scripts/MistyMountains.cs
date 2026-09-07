@@ -19,16 +19,20 @@ using System.Collections.Generic;
 // collision or not — it just means you can approach it and hit a real
 // base instead of phasing through the middle of it.
 //
-// Drawn as layered translucent triangles (guaranteed-simple polygons,
-// each one trivially valid) rather than a jagged hand-authored
-// ridgeline — atmospheric perspective (paler/more transparent further
-// back) does the rest of the work without risking a self-intersecting
-// polygon I can't render to check.
+// Drawn as layered opaque triangles (guaranteed-simple polygons, each
+// one trivially valid) rather than a jagged hand-authored ridgeline —
+// atmospheric perspective (paler further back, same idea real distant
+// mountains use) does the depth work through color alone now, not
+// alpha. An earlier version used semi-transparent fill for the same
+// "paler with distance" effect, but once another solid landmark (the
+// lake) ended up sitting close behind this range, the transparency let
+// it show straight through a supposedly-solid mountain — a real
+// landmark should occlude whatever's behind it, not blend with it.
 public partial class MistyMountains : StaticBody2D, IObstacle
 {
-    private static readonly Color Far = new(0.58f, 0.63f, 0.7f, 0.4f);
-    private static readonly Color Mid = new(0.46f, 0.53f, 0.63f, 0.55f);
-    private static readonly Color Near = new(0.36f, 0.43f, 0.53f, 0.75f);
+    private static readonly Color Far = new(0.58f, 0.63f, 0.7f);
+    private static readonly Color Mid = new(0.46f, 0.53f, 0.63f);
+    private static readonly Color Near = new(0.36f, 0.43f, 0.53f);
 
     private const float BaseY = 40f; // shared "ground" so separate peaks read as one range
 
@@ -50,11 +54,23 @@ public partial class MistyMountains : StaticBody2D, IObstacle
     // to x≈0 at ANY y, so the straight-south approach — reverified the
     // same real-movement way — is provably always clear, while the far
     // left/right shoulders of the range stay genuinely solid if you
-    // wander into them instead.
-    private static readonly (float X, float Radius)[] Flanks =
+    // wander into them instead. X and Radius are exactly what that
+    // verification covers — untouched here, since changing either risks
+    // invalidating it.
+    //
+    // Y (per flank, not shared) is new — each one is the vertical
+    // center of the specific peak it stands in for (BaseY - height/2,
+    // from that peak's own Peak() call below), not one shared "BaseY +
+    // 80" offset every flank used regardless of which peak it belonged
+    // to. That shared offset put every flank circle ~80 units south of
+    // BaseY (the peaks' own base) — south of the ENTIRE visual
+    // silhouette, not just past its base — so the actual blocked area
+    // sat in a band of open-looking grass well below where any mountain
+    // is drawn, matching none of the four peaks' real footprints.
+    private static readonly (float X, float Y, float Radius)[] Flanks =
     {
-        (-350f, 120f), (-220f, 110f), // left shoulder
-        (180f, 90f), (300f, 110f), // right shoulder
+        (-350f, BaseY - 130f / 2f, 120f), (-220f, BaseY - 100f / 2f, 110f), // left shoulder (Far/Mid peaks below)
+        (180f, BaseY - 65f / 2f, 90f), (300f, BaseY - 120f / 2f, 110f), // right shoulder (Near/Far peaks below)
     };
 
     public override void _Ready()
@@ -89,13 +105,7 @@ public partial class MistyMountains : StaticBody2D, IObstacle
 
     public IEnumerable<(Vector2, float)> GetObstacleCircles()
     {
-        // Slightly south of the visual BaseY (which peak triangles
-        // still draw at) — not load-bearing for the clear-corridor
-        // property above (that only depends on X vs radius), just
-        // keeps the collision roughly under where the peaks actually
-        // render.
-        const float y = BaseY + 80f;
-        foreach ((float x, float radius) in Flanks)
+        foreach ((float x, float y, float radius) in Flanks)
             yield return (new Vector2(x, y), radius);
     }
 }

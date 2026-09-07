@@ -34,6 +34,7 @@ public partial class Main : Node2D
     private readonly List<FishingSpot> _fishingSpots = new();
     private readonly List<GatherableFoliage> _pineTrees = new();
     private readonly List<GatherableFoliage> _berryBushes = new();
+    private readonly List<GatherableFoliage> _grassPatches = new(); // see WorldContext.GrassPatches for why this exists
 
     // The subset of _fishingSpots placed directly along the river at
     // boot — the ones RelocateRiverFish() periodically teleports to a
@@ -213,7 +214,7 @@ public partial class Main : Node2D
             (config.LogNpcThoughts ? $" [logging to {_thoughtLog.LogPath}]" : ""), "6f8068");
         _thoughtLog.Log("*", "RUN_START", $"backend={config.Provider} model={config.Model} pure_llm_mode={config.PureLlmMode}");
 
-        _world = new WorldContext { Trees = _trees, FishingSpots = _fishingSpots, PineTrees = _pineTrees, BerryBushes = _berryBushes, Sticks = _sticks, Home = _home, FirePit = _firePit, Flagpoles = _flagpoles, Agents = _agents, Animals = _animals };
+        _world = new WorldContext { Trees = _trees, FishingSpots = _fishingSpots, PineTrees = _pineTrees, BerryBushes = _berryBushes, GrassPatches = _grassPatches, Sticks = _sticks, Home = _home, FirePit = _firePit, Flagpoles = _flagpoles, Agents = _agents, Animals = _animals };
         WorldContext world = _world;
 
         List<NpcDefinition> roster = NpcRoster.Load();
@@ -384,7 +385,21 @@ public partial class Main : Node2D
         // quite far" — keeping roughly the same waves-per-length ratio
         // so the meander still reads at a similar visual frequency
         // rather than a few waves stretched thin across the new length.
-        var river = new River { Name = "River", Position = new Vector2(560, 620), Length = 2600f, Waves = 5f };
+        // "Make the village river much much longer" — 2600 (itself
+        // already grown once from an original 1050) roughly tripled.
+        // Bounds-checked against WorldExploration.MaxMapBounds (x:
+        // -2000..3500) so the ribbon never extends past the explorable/
+        // rendered ground: centered at x=560, a Length of 5000 spans
+        // -1940..2940, comfortably inside on both sides. Waves scaled to
+        // keep the same ~520-world-units-per-full-wave rhythm the
+        // previous 2600/5 ratio already established (5000/520 ≈ 9.6,
+        // rounded), and Segments scaled right alongside Length (not left
+        // fixed at 48) — BuildRibbon() samples Segments+1 points across
+        // the WHOLE curve regardless of how many waves that spans, so a
+        // much longer river at the old segment count would resample
+        // each individual wave far more coarsely and start looking
+        // faceted rather than smooth.
+        var river = new River { Name = "River", Position = new Vector2(560, 620), Length = 5000f, Waves = 10f, Segments = 92 };
         AddChild(river);
         _decor.Add(river);
         _river = river;
@@ -414,20 +429,65 @@ public partial class Main : Node2D
             _decor.Add(spot);
         }
 
-        AddChild(new ForestPatch { Name = "Forest", Position = new Vector2(600, -100) });
-        AddChild(new Foothills { Name = "Foothills", Position = new Vector2(820, -220) });
-        // Deep water, same "always behind" treatment as the shallow
-        // River above, despite actually having collision (unlike River)
-        // — a character bounces off it rather than standing on it, so
-        // getting its Y-sort right relative to a character matters much
-        // less than just not letting it paint over someone walking near it.
-        AddChild(new RiverCrossing { Name = "DeepRiver", Position = new Vector2(650, -300) });
+        // These terrain pieces are added to _decor (below), unlike
+        // when this was first written — each implements IObstacle
+        // (real physics collision already worked regardless, via their
+        // own CollisionShape2D) but BuildPathGrid() only ever reads
+        // _decor, so an NPC's own A*-ish pathing had no idea any of
+        // these were actually solid — it could path an NPC straight at
+        // the mountains and just let real collision awkwardly shove
+        // them off course, rather than routing around in the first
+        // place. Found while adding TooCloseToExisting/NudgeToClearSpot
+        // below for a different bug (a grass patch placed directly on
+        // top of the fire pit) — that check is only as complete as
+        // _decor is, so this was the same gap wearing two different
+        // hats.
+        var forest = new ForestPatch { Name = "Forest", Position = new Vector2(600, -100) };
+        AddChild(forest);
+        _decor.Add(forest);
+        var foothills = new Foothills { Name = "Foothills", Position = new Vector2(820, -220) };
+        AddChild(foothills);
+        _decor.Add(foothills);
 
         // Position is a best-effort guess at landing near the top edge
         // of whatever frame the village's own bounds produce, moved
         // further out than before to leave real room for the obstacle
         // course above — unverified without being able to render this.
+        // Constructed (and added to _decor) here, but not actually
+        // AddChild'd into the scene tree until AFTER the lake below —
+        // _decor only drives the placement/pathing CHECKS (plain C#,
+        // no tree dependency), while actual draw order comes from real
+        // scene-tree child order. Doing it in this split order is what
+        // lets NudgeToClearSpot see the mountains' own flank circles
+        // when it places the lake next, while still leaving mountains
+        // as the LATER sibling — drawn on top of the lake, the correct
+        // way around for a solid landmark that should occlude water
+        // behind it, not the other way around.
         var mountains = new MistyMountains { Name = "MistyMountains", Position = new Vector2(700, -380) };
+        _decor.Add(mountains);
+
+        // A round lake, not a straight river-crossing band — "the misty
+        // mountain and random rivers are not nice and wavy like the
+        // village river... make them more like lakes instead" (see
+        // Lake's own header for the full reasoning, including why it's
+        // premade art now rather than a procedural shape).
+        //
+        // (650, -300) — directly between Forest, Foothills, AND Misty
+        // Mountains — was never actually clear ground for something
+        // this size (obstacle radius 126): fine for the old, much
+        // thinner RiverCrossing band that used to sit here, not a big
+        // round lake. NudgeToClearSpot alone couldn't fix that
+        // gracefully — the only way out of a spot boxed in by three
+        // large neighbors at once was a long straight-line push, which
+        // just traded "overlapping the mountains" for "floating in the
+        // sky past their peaks." (1250, -300) is open ground east of
+        // the whole cluster instead — same distance south as the
+        // original pick, comfortably clear of Foothills and every
+        // Misty Mountains flank without needing to travel anywhere.
+        var mountainLake = new Lake { Name = "MountainLake", Position = NudgeToClearSpot(new Vector2(1250, -300), 140f * 0.9f), Radius = 140f };
+        AddChild(mountainLake);
+        _decor.Add(mountainLake);
+
         AddChild(mountains);
         World().Register("misty_mountains", mountains);
         _flagpoles["misty_mountains"] = mountains;
@@ -482,24 +542,32 @@ public partial class Main : Node2D
             _decor.Add(pine);
         }
 
-        // Berry bushes (gatherable) — one of each kind to start, same
-        // shared sprite with a per-type Modulate tint (see
+        // Berry bushes (gatherable) — TWO of each kind to start now (was
+        // one), same shared sprite with a per-type Modulate tint (see
         // GatherableFoliage's own header for why there's only one
-        // source sprite for all three).
+        // source sprite for all three). "More berry bushes for
+        // everyone" — the original 3 total, shared across every human
+        // AND every animal on the map, turned out to be genuine scarcity
+        // once population grew; see GrassPatches just below for the
+        // other half of that same fix.
         (Vector2 Pos, string Item, Color Tint)[] berries =
         {
             (new Vector2(700, 250), "blueberry", new Color(0.5f, 0.9f, 2.0f)),
             (new Vector2(850, 420), "blackberry", new Color(0.55f, 0.75f, 1.5f)),
             (new Vector2(300, 380), "raspberry", new Color(1.2f, 0.6f, 0.6f)),
+            (new Vector2(550, 480), "blueberry", new Color(0.5f, 0.9f, 2.0f)),
+            (new Vector2(950, 250), "blackberry", new Color(0.55f, 0.75f, 1.5f)),
+            (new Vector2(180, 480), "raspberry", new Color(1.2f, 0.6f, 0.6f)),
         };
         foreach ((Vector2 pos, string item, Color tint) in berries)
         {
             int i = _berryBushes.Count;
+            const float trunkRadius = 8f;
             var bush = new GatherableFoliage
             {
-                Name = $"Berry{i}", Position = pos, Count = 3,
+                Name = $"Berry{i}", Position = NudgeToClearSpot(pos, trunkRadius), Count = 3,
                 ActionId = "gather_berry", ItemName = item,
-                TexturePath = "res://assets/world/bush_berry.png", SpriteScale = 2.5f, TrunkRadius = 8f,
+                TexturePath = "res://assets/world/bush_berry.png", SpriteScale = 2.5f, TrunkRadius = trunkRadius,
                 Tint = tint,
             };
             _worldLayer.AddChild(bush);
@@ -507,6 +575,36 @@ public partial class Main : Node2D
             _berryBushes.Add(bush);
             _decor.Add(bush);
         }
+
+        // Grass patches — animal food only (ActionId "" — see
+        // WorldContext.GrassPatches's own header for why), common and
+        // scattered widely so a rabbit wandering almost anywhere on the
+        // starting map has SOMETHING within its detection radius, not
+        // just the handful of actual berry bushes. grass_patch.png (a
+        // premade round grass mound — see assets/CREDITS.md) rather than
+        // bush_plain.png tinted green, which used to make these read as
+        // round bush blobs instead of ground-level grass. Walkable —
+        // ground cover, not an obstacle; every character should walk
+        // straight over it, same as GenerateGrassPatch's later-grown
+        // patches (this is just the starting seed batch, same shape).
+        //
+        // "You put a grass patch right on top of a fire — check if
+        // anything existing is already there before placing anything,
+        // same goes for all objects." One of these ((150, 300)) is
+        // EXACTLY the fire pit's own position — that's the actual bug,
+        // not a hypothetical one. Every position below now goes through
+        // NudgeToClearSpot rather than being trusted as hand-picked-and-
+        // therefore-safe, which is what let that ship in the first
+        // place — a real runtime check against every already-placed
+        // object's actual footprint, not another guess at coordinates
+        // that look clear on paper.
+        Vector2[] grassPositions =
+        {
+            new(450, 200), new(620, 400), new(150, 300), new(780, 550),
+            new(1000, 350), new(350, 550), new(880, 180), new(50, 420),
+        };
+        foreach (Vector2 pos in grassPositions)
+            SpawnGrassPatch(pos);
 
         // Standalone — oak/bare tree/plain bush, nothing to gather, just
         // scenery to walk around (same as Foothills/ForestPatch aren't
@@ -733,7 +831,7 @@ public partial class Main : Node2D
 
     // What actually appears in a newly-discovered region — reuses the
     // exact same classes the hand-placed village already uses (AppleTree,
-    // FishingSpot, Foothills, RiverCrossing) rather than inventing new
+    // FishingSpot, Foothills, Lake) rather than inventing new
     // procedural art/shapes, so generated content looks and behaves
     // identically to curated content. Most regions stay empty (roll >
     // RiverChance below) — the original village isn't densely packed
@@ -746,16 +844,22 @@ public partial class Main : Node2D
         float jitterRange = WorldExploration.RegionSize * 0.3f;
         Vector2 pos = regionCenter + new Vector2(Dice.FloatRange(-jitterRange, jitterRange), Dice.FloatRange(-jitterRange, jitterRange));
 
+        // Grass (56-70, 15%) is deliberately the single most likely
+        // non-empty roll here bar trees — common animal food, same
+        // "why are rabbits starving" fix as BuildWorld's own initial
+        // GrassPatches batch, just keeping density up as the map grows
+        // through exploration too, not just at boot.
         int roll = Dice.Roll(100); // 1-100
-        if (roll <= 15) GenerateTree(pos);
-        else if (roll <= 23) GeneratePine(pos);
-        else if (roll <= 31) GenerateOak(pos);
-        else if (roll <= 36) GenerateBareTree(pos);
-        else if (roll <= 46) GenerateFishingSpot(pos);
-        else if (roll <= 58) GenerateBerryBush(pos);
-        else if (roll <= 63) GeneratePlainBush(pos);
-        else if (roll <= 78) GenerateMountainPatch(pos);
-        else if (roll <= 91) GenerateRiverPatch(pos);
+        if (roll <= 14) GenerateTree(pos);
+        else if (roll <= 21) GeneratePine(pos);
+        else if (roll <= 28) GenerateOak(pos);
+        else if (roll <= 32) GenerateBareTree(pos);
+        else if (roll <= 41) GenerateFishingSpot(pos);
+        else if (roll <= 55) GenerateBerryBush(pos);
+        else if (roll <= 70) GenerateGrassPatch(pos);
+        else if (roll <= 74) GeneratePlainBush(pos);
+        else if (roll <= 87) GenerateMountainPatch(pos);
+        else if (roll <= 98) GenerateLake(pos);
 
         // A generated tree/fishing spot is a new obstacle and a new
         // resource id every NpcAgent needs to see — cheap enough (a
@@ -768,7 +872,7 @@ public partial class Main : Node2D
     private void GenerateTree(Vector2 pos)
     {
         int i = _trees.Count;
-        var tree = new AppleTree { Name = $"Tree{i}", Position = pos, AppleCount = 3 };
+        var tree = new AppleTree { Name = $"Tree{i}", Position = NudgeToClearSpot(pos, AppleTree.TrunkRadius), AppleCount = 3 };
         _worldLayer.AddChild(tree);
         World().Register($"tree_{i}", tree);
         _trees.Add(tree);
@@ -780,7 +884,12 @@ public partial class Main : Node2D
     private void GenerateFishingSpot(Vector2 pos)
     {
         int i = _fishingSpots.Count;
-        var spot = new FishingSpot { Name = $"FishingSpot{i}", Position = pos, FishCount = 3 };
+        // FishingSpot has no real collision (Node2D, not IObstacle —
+        // water is walkable) — this nudge is purely so a generated one
+        // doesn't visually land inside a tree trunk or bush, not a
+        // physics necessity. A generic 20px stand-in radius, since it
+        // has no TrunkRadius of its own to read.
+        var spot = new FishingSpot { Name = $"FishingSpot{i}", Position = NudgeToClearSpot(pos, 20f), FishCount = 3 };
         _worldLayer.AddChild(spot);
         World().Register($"fish_{i}", spot);
         _fishingSpots.Add(spot);
@@ -792,11 +901,12 @@ public partial class Main : Node2D
     private void GeneratePine(Vector2 pos)
     {
         int i = _pineTrees.Count;
+        const float trunkRadius = 12f;
         var pine = new GatherableFoliage
         {
-            Name = $"Pine{i}", Position = pos, Count = 3,
+            Name = $"Pine{i}", Position = NudgeToClearSpot(pos, trunkRadius), Count = 3,
             ActionId = "gather_pinecone", ItemName = "pinecone",
-            TexturePath = "res://assets/world/pine.png", SpriteScale = 4.5f, TrunkRadius = 12f,
+            TexturePath = "res://assets/world/pine.png", SpriteScale = 4.5f, TrunkRadius = trunkRadius,
         };
         _worldLayer.AddChild(pine);
         World().Register($"pine_{i}", pine);
@@ -817,11 +927,12 @@ public partial class Main : Node2D
     {
         (string item, Color tint) = BerryKinds[Dice.Roll(BerryKinds.Length) - 1];
         int i = _berryBushes.Count;
+        const float trunkRadius = 8f;
         var bush = new GatherableFoliage
         {
-            Name = $"Berry{i}", Position = pos, Count = 3,
+            Name = $"Berry{i}", Position = NudgeToClearSpot(pos, trunkRadius), Count = 3,
             ActionId = "gather_berry", ItemName = item,
-            TexturePath = "res://assets/world/bush_berry.png", SpriteScale = 2.5f, TrunkRadius = 8f,
+            TexturePath = "res://assets/world/bush_berry.png", SpriteScale = 2.5f, TrunkRadius = trunkRadius,
             Tint = tint,
         };
         _worldLayer.AddChild(bush);
@@ -832,6 +943,56 @@ public partial class Main : Node2D
         Log($"[world] a {item} bush has grown near ({pos.X:0}, {pos.Y:0}).", "9fc98a");
     }
 
+    // Animal food only — see WorldContext.GrassPatches's own header.
+    // Not version-bumped (_world.ContentVersion++) like the other
+    // Generate* calls above — that counter exists purely to invalidate
+    // NpcAgent's cached TreeIds()/FishingSpotIds() target-id lists, and
+    // grass patches were deliberately never given a human-facing
+    // target-id enum to begin with (ActionId "" — no gather_* action
+    // ever lists them), so there is nothing here for that cache to go
+    // stale about.
+    private void GenerateGrassPatch(Vector2 pos)
+    {
+        SpawnGrassPatch(pos);
+        Log($"[world] a patch of grass has grown near ({pos.X:0}, {pos.Y:0}).", "9fc98a");
+    }
+
+    // Shared by both the hand-placed starting batch (BuildWorld, above)
+    // and GenerateGrassPatch — identical GatherableFoliage construction
+    // either way, extracted so a future tweak (new field, different
+    // texture, adjusted scale) can't land in one call site and get
+    // silently forgotten in the other, which is exactly what had
+    // already started happening (each site had its own, separately
+    // reworded copy of the same TrunkRadius comment).
+    private GatherableFoliage SpawnGrassPatch(Vector2 pos)
+    {
+        int i = _grassPatches.Count;
+        const float trunkRadius = 6f; // spacing only now (Walkable skips the actual collision/obstacle circle this would otherwise become)
+        var patch = new GatherableFoliage
+        {
+            Name = $"Grass{i}", Position = NudgeToClearSpot(pos, trunkRadius), Count = 2,
+            ActionId = "", ItemName = "grass",
+            TexturePath = "res://assets/world/grass_patch.png", SpriteScale = 0.65f, TrunkRadius = trunkRadius,
+            Walkable = true, // ground cover for rabbits/herbivores to graze — every character should walk straight over it, not detour around it
+        };
+        // AddBackgroundNode, not _worldLayer.AddChild — _worldLayer is
+        // YSortEnabled (see its own field comment), which is exactly
+        // right for a bush or tree a character can stand in front of OR
+        // behind, but wrong for flat ground cover with no real height:
+        // GatherableFoliage's shared bottom-anchored sprite offset made
+        // Y-sort compare the grass's OWN anchor point against a
+        // character's feet each frame, so standing even slightly
+        // "below" a patch drew the grass sprite on top of the character
+        // instead of under them. Same "always behind, never Y-sorted"
+        // treatment River/Lake/Foothills/ForestPatch already get, for
+        // the same reason.
+        AddBackgroundNode(patch);
+        World().Register($"grass_{i}", patch);
+        _grassPatches.Add(patch);
+        _decor.Add(patch);
+        return patch;
+    }
+
     // Standalone foliage — oak, the bare/dead tree, a plain bush —
     // never registered (nothing ever looks one up by id, same as
     // Foothills/ForestPatch aren't either) and never bumps
@@ -840,7 +1001,7 @@ public partial class Main : Node2D
     // height, unlike the flat backdrop pieces below.
     private void GenerateOak(Vector2 pos)
     {
-        var oak = new DecorativeFoliage { Name = $"Oak{_decor.Count}", Position = pos, TexturePath = "res://assets/world/oak.png", SpriteScale = 4.5f, TrunkRadius = 12f };
+        var oak = new DecorativeFoliage { Name = $"Oak{_decor.Count}", Position = NudgeToClearSpot(pos, 12f), TexturePath = "res://assets/world/oak.png", SpriteScale = 4.5f, TrunkRadius = 12f };
         _worldLayer.AddChild(oak);
         _decor.Add(oak);
         Log($"[world] an oak tree has grown near ({pos.X:0}, {pos.Y:0}).", "9fc98a");
@@ -848,7 +1009,7 @@ public partial class Main : Node2D
 
     private void GenerateBareTree(Vector2 pos)
     {
-        var tree = new DecorativeFoliage { Name = $"BareTree{_decor.Count}", Position = pos, TexturePath = "res://assets/world/bare_tree.png", SpriteScale = 4.5f, TrunkRadius = 10f };
+        var tree = new DecorativeFoliage { Name = $"BareTree{_decor.Count}", Position = NudgeToClearSpot(pos, 10f), TexturePath = "res://assets/world/bare_tree.png", SpriteScale = 4.5f, TrunkRadius = 10f };
         _worldLayer.AddChild(tree);
         _decor.Add(tree);
         Log($"[world] a bare, leafless tree stands near ({pos.X:0}, {pos.Y:0}).", "9fc98a");
@@ -856,7 +1017,7 @@ public partial class Main : Node2D
 
     private void GeneratePlainBush(Vector2 pos)
     {
-        var bush = new DecorativeFoliage { Name = $"PlainBush{_decor.Count}", Position = pos, TexturePath = "res://assets/world/bush_plain.png", SpriteScale = 2.5f, TrunkRadius = 8f };
+        var bush = new DecorativeFoliage { Name = $"PlainBush{_decor.Count}", Position = NudgeToClearSpot(pos, 8f), TexturePath = "res://assets/world/bush_plain.png", SpriteScale = 2.5f, TrunkRadius = 8f };
         _worldLayer.AddChild(bush);
         _decor.Add(bush);
         Log($"[world] a bush has grown near ({pos.X:0}, {pos.Y:0}).", "9fc98a");
@@ -869,23 +1030,34 @@ public partial class Main : Node2D
     // stays the one named "far-off landmark" NPCs can reason about.
     private void GenerateMountainPatch(Vector2 pos)
     {
-        var patch = new Foothills { Name = $"GeneratedFoothills{_decor.Count}", Position = pos };
+        const float radius = 70f; // Foothills' own default Radius
+        var patch = new Foothills { Name = $"GeneratedFoothills{_decor.Count}", Position = NudgeToClearSpot(pos, radius) };
         AddBackgroundNode(patch);
         _decor.Add(patch);
         Log($"[world] new foothills have come into view near ({pos.X:0}, {pos.Y:0}).", "9fc98a");
     }
 
-    // A localized water band (RiverCrossing, not the village's wavy
-    // River ribbon — replicating that procedurally would risk landing
-    // badly without being able to render and check it) — decorative
-    // and solid, same "always behind, never Y-sorted" terrain
-    // treatment as every other background piece.
-    private void GenerateRiverPatch(Vector2 pos)
+    // A round lake (see Lake's own header), not the village's wavy
+    // River ribbon — replicating THAT procedurally would risk landing
+    // badly without being able to render and check it, the same
+    // reasoning that kept this a localized water patch rather than a
+    // second full river before. Decorative and solid, same "always
+    // behind, never Y-sorted" terrain treatment as every other
+    // background piece. A smaller default Radius than the hand-placed
+    // mountain lake — these turn up scattered all over an exploring
+    // player's path, not just once as a single landmark.
+    private void GenerateLake(Vector2 pos)
     {
-        var patch = new RiverCrossing { Name = $"GeneratedRiver{_decor.Count}", Position = pos };
+        const float radius = 90f;
+        // NudgeToClearSpot gets the actual obstacle radius (0.9x,
+        // matching Lake.GetObstacleCircles()), not the full visual
+        // Radius — passing the bigger number would only over-space
+        // generated lakes from their neighbors versus what the real
+        // collision circle needs.
+        var patch = new Lake { Name = $"GeneratedLake{_decor.Count}", Position = NudgeToClearSpot(pos, radius * 0.9f), Radius = radius };
         AddBackgroundNode(patch);
         _decor.Add(patch);
-        Log($"[world] the sound of running water carries from near ({pos.X:0}, {pos.Y:0}).", "9fc98a");
+        Log($"[world] a small lake glimmers near ({pos.X:0}, {pos.Y:0}).", "9fc98a");
     }
 
     // Adds a Main-level child and forces it BEFORE _worldLayer in
@@ -985,6 +1157,113 @@ public partial class Main : Node2D
     private void BuildLighting()
     {
         _worldLayer.AddChild(new DayNightCycle { Name = "WorldDimmer" });
+    }
+
+    // "Check if anything existing is already there before placing
+    // anything — same goes for all objects." A grass patch got placed
+    // directly on top of the fire pit; a hand-picked coordinate that
+    // LOOKS clear on paper is exactly how that happened. This is the
+    // real runtime check instead: every object already in _decor that
+    // implements IObstacle, at its own actual GetObstacleCircles()
+    // footprint — the SAME data BuildPathGrid() below builds the whole
+    // NPC pathing obstacle list from, not a separate, possibly-
+    // inconsistent notion of "occupied." newObjectRadius is the thing
+    // about to be placed's own footprint, so two small objects can sit
+    // closer together than two large ones — this isn't just "is the
+    // CENTER point free."
+    private const float PlacementMinGap = 12f; // a little visual breathing room beyond bare non-overlap
+
+    private bool TooCloseToExisting(Vector2 pos, float newObjectRadius)
+    {
+        foreach (Node2D deco in _decor)
+        {
+            // Walkable GatherableFoliage (grass) deliberately yields no
+            // circles from GetObstacleCircles() — IObstacle's own
+            // contract is "physically blocks movement," and walkable
+            // ground cover doesn't. But that means it's otherwise
+            // invisible to THIS check too, since both read the same
+            // method — two grass patches could land exactly on top of
+            // each other with nothing to stop it. Checked against its
+            // own TrunkRadius directly (the same number it would have
+            // contributed to GetObstacleCircles() if it weren't
+            // walkable) rather than changing what IObstacle means for
+            // every other implementer just to fix spacing for one.
+            if (deco is GatherableFoliage { Walkable: true } walkable)
+            {
+                if (pos.DistanceTo(deco.Position) < walkable.TrunkRadius + newObjectRadius + PlacementMinGap)
+                    return true;
+                continue;
+            }
+
+            if (deco is not IObstacle obstacle) continue;
+            foreach ((Vector2 offset, float radius) in obstacle.GetObstacleCircles())
+                if (pos.DistanceTo(deco.Position + offset) < radius + newObjectRadius + PlacementMinGap)
+                    return true;
+        }
+
+        // "We also got trees growing in the river." River is
+        // deliberately NOT an IObstacle (shallow, walkable, no
+        // collision by design — see its own header) so the _decor loop
+        // above never sees it at all. That's correct for movement, but
+        // wrong for PLACEMENT — nothing should visually spawn standing
+        // in the water regardless of whether it can walk there. Checked
+        // against the river's own true (wavy) centerline at this exact
+        // x, same as fishing spots already place themselves precisely
+        // on it via GetCenterlineWorldY — not a straight-line guess that
+        // would be wrong at some x along the sine curve.
+        if (_river != null)
+        {
+            float halfSpan = _river.Length / 2f;
+            float localX = pos.X - _river.Position.X;
+            if (localX >= -halfSpan && localX <= halfSpan)
+            {
+                float centerY = _river.GetCenterlineWorldY(pos.X);
+                if (Mathf.Abs(pos.Y - centerY) < _river.Thickness / 2f + newObjectRadius + PlacementMinGap)
+                    return true;
+            }
+        }
+
+        return false;
+    }
+
+    // Nudges a candidate position to the nearest actually-clear spot if
+    // something's already there — a small outward ring search around
+    // the original intent (not a random relocation), so a curated
+    // hand-placed position stays close to where it was meant to go, and
+    // a procedurally-jittered one stays within its own region. Used by
+    // every Generate*/hand-placed batch below. Gives up and returns the
+    // original position if 8 rings out don't find anything clear —
+    // placed imperfectly is still better than not placed at all, and by
+    // that point something has gone stranger than an ordinary crowded
+    // corner of the map.
+    private Vector2 NudgeToClearSpot(Vector2 desired, float newObjectRadius)
+    {
+        if (!TooCloseToExisting(desired, newObjectRadius))
+            return desired;
+        // 8 rings × 24px (192px max reach) used to be enough for the
+        // usual case — one nearby object, a small nudge clears it. The
+        // hand-placed mountain lake needed real distance from TWO large
+        // neighbors at once (Foothills' full circle and Misty
+        // Mountains' own flank circles, both over 100px radius) — every
+        // candidate within 192px of its hand-picked spot was still too
+        // close to one or the other, so this silently gave up and
+        // returned the original, still-overlapping position instead of
+        // ever finding the genuinely clear spot that exists further
+        // out. 20 rings (480px max reach) gives a real placement enough
+        // room to escape a cluster like that.
+        for (int ring = 1; ring <= 20; ring++)
+        {
+            float ringRadius = ring * 24f;
+            const int samples = 8;
+            for (int s = 0; s < samples; s++)
+            {
+                float angle = Mathf.Tau * s / samples;
+                Vector2 candidate = desired + ringRadius * new Vector2(Mathf.Cos(angle), Mathf.Sin(angle));
+                if (!TooCloseToExisting(candidate, newObjectRadius))
+                    return candidate;
+            }
+        }
+        return desired;
     }
 
     private void BuildPathGrid()

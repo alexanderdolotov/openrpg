@@ -19,6 +19,21 @@ public class WorldContext
     // reason TreeIds()/FishingSpotIds() are separate lists too.
     public List<GatherableFoliage> PineTrees;
     public List<GatherableFoliage> BerryBushes;
+
+    // Same GatherableFoliage class again, this time with ActionId ""
+    // — no human/NPC gather_* action ever matches an empty id, so
+    // TryInteract always refuses a person and this is animal food
+    // ONLY (Rabbit/Bear's own AnimalEat() calls), never a resource-id
+    // enum for any human-facing tool. Exists because rabbits were
+    // observed starving to death despite berry bushes existing — with
+    // only a handful of bushes on the whole map (shared with every
+    // human AND every animal) and no fallback once none are within
+    // detection range, an unlucky rabbit had nothing else to try. Grass
+    // patches are deliberately common and low-value (see
+    // Main.GenerateGrassPatch/BuildWorld) — a fallback food source, not
+    // a berry-bush replacement.
+    public List<GatherableFoliage> GrassPatches;
+
     public List<Stick> Sticks;
 
     public Home Home;

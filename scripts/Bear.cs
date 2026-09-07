@@ -56,19 +56,26 @@ public partial class Bear : Animal
             return;
         }
 
+        // Berries preferred (see the point-value split below) — grass
+        // only when no bush is within range. Same fallback Rabbit's own
+        // DecideBehavior uses now, and the same reason it exists: a
+        // bear that can't find a bush shouldn't have to jump straight
+        // to StarvingThreshold/attacking someone when there's a
+        // perfectly real, common food source it just isn't checking.
         GatherableFoliage bush = FindNearestFoliage(World.BerryBushes, DetectionRadius);
-        if (bush != null)
+        GatherableFoliage food = bush ?? FindNearestFoliage(World.GrassPatches, DetectionRadius);
+        if (food != null)
         {
-            float dist = GlobalPosition.DistanceTo(bush.GlobalPosition);
+            float dist = GlobalPosition.DistanceTo(food.GlobalPosition);
             if (dist <= EatRange)
             {
-                if (bush.AnimalEat())
-                    Hunger = Mathf.Min(MaxHunger, Hunger + 40f);
+                if (food.AnimalEat())
+                    Hunger = Mathf.Min(MaxHunger, Hunger + (food == bush ? 40f : 15f));
                 _state = State.Wandering;
             }
             else
             {
-                TargetNode = bush;
+                TargetNode = food;
                 _state = State.SeekingFood;
             }
             return;

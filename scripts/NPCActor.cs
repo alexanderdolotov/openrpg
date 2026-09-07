@@ -104,6 +104,16 @@ public partial class NPCActor : CharacterBody2D, ICombatant
     private const float SpriteScale = 2.75f;
     private AnimatedSprite2D _sprite;
 
+    // Which of the 4 drawn facings (CharacterSpriteBuilder.Down/Up/
+    // Left/Right) is currently showing — updated only while actually
+    // moving (UpdateSpriteFacing), held otherwise, same as a real
+    // character doesn't un-face a direction just by standing still.
+    // Down by default: it's the pose CharacterSpriteBuilder.Build()
+    // already uses for the very first idle frame, so a freshly-spawned,
+    // not-yet-moved character's remembered facing matches what's
+    // actually on screen.
+    private string _facing = CharacterSpriteBuilder.Down;
+
     // Above-the-head UI — world-space children (not CanvasLayer), so
     // they move and zoom with the character exactly like the sprite
     // does, no per-frame screen-position projection needed. The emoji
@@ -223,10 +233,10 @@ public partial class NPCActor : CharacterBody2D, ICombatant
         // with every transform _sprite already gets — most notably the
         // 90° "lying down" rotation Sleeping/Incapacitated use, which
         // should carry the torch along with the body rather than leave
-        // it standing upright over a horizontal character. FlipH on the
-        // parent only mirrors the parent's own texture though, not a
-        // child's position, so UpdateSpriteFacing() mirrors
-        // TorchHandOffset by hand. Visibility follows _torchLight's, set
+        // it standing upright over a horizontal character. The parent's
+        // own texture flips (or rather, swaps to a different drawn
+        // facing) independently of a child's position though, so
+        // UpdateSpriteFacing() mirrors TorchHandOffset by hand. Visibility follows _torchLight's, set
         // wherever that is below — one hasTorch check driving both.
         _torchSprite = new Sprite2D
         {
@@ -425,7 +435,10 @@ public partial class NPCActor : CharacterBody2D, ICombatant
 
     // Local to _sprite, in its own pre-scale pixel space (same space
     // Offset above uses) — near the right hand of a character facing
-    // right; UpdateSpriteFacing() negates the X half when facing left.
+    // right; UpdateSpriteFacing() negates the X half when _facing is
+    // Left (and leaves it as-is for Up/Down — there's no separate
+    // held-torch art per facing, just the one hand-height anchor,
+    // mirrored or not).
     // Y was originally -9 (mid-torso), but with the torch's own height
     // added on top of that anchor, the flame landed up by the ear
     // instead of a hand held at the side — lower anchor, same shape.
@@ -593,35 +606,53 @@ public partial class NPCActor : CharacterBody2D, ICombatant
     public void SetCharacterSprite(int variantIndex)
     {
         _sprite.SpriteFrames = CharacterSpriteBuilder.Build(variantIndex);
-        _sprite.Play("idle");
+        _sprite.Play("idle_" + _facing);
     }
 
-    // Flips to face the way this character is actually moving, and
-    // switches between the idle/walk animation based on whether Velocity
-    // is nonzero right now — reads the same Velocity every mover here
-    // already sets (ProcessNavigating's MoveAndSlide() call, or
-    // PlayerCharacter's free-movement branch), so both an NPC's assigned
-    // navigation and the player's WASD input animate identically without
-    // either needing to know this exists. Protected, not private —
-    // PlayerCharacter calls it again after its own idle-movement branch
-    // sets Velocity, since that happens after this class's own
-    // _PhysicsProcess (and this call within it) already ran for the
-    // frame; everywhere else, this one call is all that's needed.
+    // Picks which of the 4 drawn facings (CharacterSpriteBuilder.Down/
+    // Up/Left/Right) matches how this character is actually moving, and
+    // switches between that facing's idle/walk animation based on
+    // whether Velocity is nonzero right now — reads the same Velocity
+    // every mover here already sets (ProcessNavigating's MoveAndSlide()
+    // call, or PlayerCharacter's free-movement branch), so both an
+    // NPC's assigned navigation and the player's WASD input animate
+    // identically without either needing to know this exists. Protected,
+    // not private — PlayerCharacter calls it again after its own idle-
+    // movement branch sets Velocity, since that happens after this
+    // class's own _PhysicsProcess (and this call within it) already ran
+    // for the frame; everywhere else, this one call is all that's
+    // needed.
+    //
+    // Dominant-axis: whichever of X/Y Velocity is larger in magnitude
+    // decides left/right vs up/down, same as any 4-direction top-down
+    // character picks a single facing out of free-form movement. Only
+    // reconsidered while actually moving — standing still keeps
+    // whatever _facing was last moving toward, the same way a real
+    // person doesn't spin to face some default direction the instant
+    // they stop walking.
     protected void UpdateSpriteFacing()
     {
         if (_sprite?.SpriteFrames == null)
             return;
 
-        if (Mathf.Abs(Velocity.X) > 1f)
-            _sprite.FlipH = Velocity.X < 0f;
+        bool moving = Velocity.Length() > 1f;
+        if (moving)
+        {
+            _facing = Mathf.Abs(Velocity.X) > Mathf.Abs(Velocity.Y)
+                ? (Velocity.X < 0f ? CharacterSpriteBuilder.Left : CharacterSpriteBuilder.Right)
+                : (Velocity.Y < 0f ? CharacterSpriteBuilder.Up : CharacterSpriteBuilder.Down);
+        }
 
-        // Keeps the torch on whichever hand faces outward — see
-        // TorchHandOffset's own comment for why this can't just ride
-        // along with _sprite.FlipH the way the body art does.
+        // Keeps the torch on whichever hand faces outward — mirrored
+        // for Left, left as-is otherwise (Up/Down have no separate
+        // held-torch art, just the one hand-height anchor).
         if (_torchSprite != null)
-            _torchSprite.Position = new Vector2(_sprite.FlipH ? -TorchHandOffset.X : TorchHandOffset.X, TorchHandOffset.Y);
+        {
+            float x = _facing == CharacterSpriteBuilder.Left ? -TorchHandOffset.X : TorchHandOffset.X;
+            _torchSprite.Position = new Vector2(x, TorchHandOffset.Y);
+        }
 
-        string wanted = Velocity.Length() > 1f ? "walk" : "idle";
+        string wanted = (moving ? "walk_" : "idle_") + _facing;
         if (_sprite.Animation != wanted)
             _sprite.Play(wanted);
     }

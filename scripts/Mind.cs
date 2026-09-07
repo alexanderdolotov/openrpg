@@ -1,4 +1,7 @@
 using System;
+using System.Collections.Generic;
+using System.Linq;
+using System.Text.RegularExpressions;
 using System.Threading.Tasks;
 
 // The strategic layer's orchestration — two sequential calls per
@@ -82,7 +85,7 @@ public class Mind
     // "no thanks" both genuinely available without reopening the door
     // to the drift this exists to close off.
     private const string PlayerRequestInstruction =
-        "The real human player — not another character in this world — just said something to you directly, described in the situation below. Your only job this turn is to answer them, right now, with a real tool call. First figure out which of two things this actually is: a QUESTION, or a REQUEST to do something. If they asked a question — about you, what you're carrying, your stats, your condition, where you are, what you're doing, anything you'd genuinely know the answer to — call speak and give the real, specific answer, using the actual information already provided to you below (your inventory, your natural abilities, your physical condition, your location) — an exact count or fact if you have one (\"I have 3 apples\"), not a vague deflection, a change of subject, or an unrelated action like follow/travel/wait; if you truly don't know or don't have whatever they're asking about, say THAT plainly (\"I don't have any\"), which is still a real, honest answer. If instead they're asking you to DO something, decide whether you're going along with it: call whichever single tool actually matches it — follow to walk with them, catch_fish/pick_apple/gather_pinecone/gather_berry to do the activity they proposed together, travel if they're inviting you somewhere, trade if they asked for an item, or whatever else genuinely fits what they said — or, if you're not going along with it or you're genuinely unsure, call speak and say so directly, in your own words; a plain, honest no is a real answer there too. Weigh it honestly against your personality and whatever else is going on, same as any other choice, but reaching for something UNRELATED to what they actually said or asked — gathering on your own, wandering off, waiting, following someone when they asked a question — is not a real option right now: that's dodging, not answering, and a worse look than an honest no or \"I don't know.\"";
+        "The real human player — not another character in this world — just said something to you directly, described in the situation below. Your only job this turn is to answer them, right now, with a real tool call. First figure out which of two things this actually is: a QUESTION, or a REQUEST to do something. If they asked a question — about you, what you're carrying, your stats, your condition, where you are, what you're doing, anything you'd genuinely know the answer to — call speak and give the real, specific answer, using the actual information already provided to you below (your inventory, your natural abilities, your physical condition, your location) — an exact count or fact if you have one (\"I have 3 apples\"), not a vague deflection, a change of subject, or an unrelated action like follow/travel/wait; if you truly don't know or don't have whatever they're asking about, say THAT plainly (\"I don't have any\"), which is still a real, honest answer. If instead they're asking you to DO something, decide whether you're going along with it: call whichever single tool actually matches it — follow to walk with them, catch_fish/pick_apple/gather_pinecone/gather_berry to do the activity they proposed together, travel if they're inviting you somewhere, trade if they asked for an item, attack if they want help fighting something, pick_up_stick if they're pointing one out, light_fire if they want the fire pit lit (it needs nothing else at all — no stick, no fuel, nothing in your inventory, just walk up and light it, so don't stall on 'checking if it needs fuel first' or anything like that — that isn't a real requirement), make_torch if they want you to turn a stick you're carrying into a torch, cook_meat if they want raw meat cooked, or whatever else genuinely fits what they said — and actually call that tool THIS turn if you're going along with it, not just say you will and leave the real action for later; agreeing out loud without ever calling the matching tool is the same as not helping at all. Musing about it out loud is the same problem wearing a softer voice — 'maybe I could try that' or 'I'm not sure, but I do have what I'd need' is still not a decision, just a decision-shaped sentence; if you're leaning toward yes, commit and call the tool, don't describe yourself almost doing it. If you're not going along with it or you're genuinely unsure, call speak and say so directly and PLAINLY, in your own words — a clear 'no' or 'I don't know' — not a hedge that quietly implies yes while technically committing to nothing. Weigh it honestly against your personality and whatever else is going on, same as any other choice, but reaching for something UNRELATED to what they actually said or asked — gathering on your own, wandering off, waiting, following someone when they asked a question, or repeatedly talking ABOUT helping without ever calling the tool that actually does it — is not a real option right now: that's dodging, not answering, and a worse look than an honest no or \"I don't know.\"";
 
     private const string SummarizeSystemPrompt =
         "You are compressing an NPC's memory log into a short diary paragraph (3-5 sentences) they'll carry forward. Preserve what matters for future decisions — where they've been, what they've done, anything notable, and anything said aloud (by them or heard from someone else), including who said or asked for what by name. A repeated identical failure is NOT routine detail — it's the opposite: state plainly what failed, why, and how many times, so it isn't attempted again pointlessly. Drop only genuinely routine, non-repeated detail (a single successful wait, a normal walk). Write in first person, past tense.";
@@ -254,17 +257,32 @@ public class Mind
         if (!result.Ok)
             return ThreatResult.Fail($"act_{result.Error}");
 
-        if (result.Message.ToolCalls is not { Length: > 0 })
-            return ThreatResult.Fail("no_tool_call");
+        if (result.Message.ToolCalls is { Length: > 0 })
+        {
+            FunctionCall fn = result.Message.ToolCalls[0]?.Function;
+            if (fn == null || string.IsNullOrEmpty(fn.Name))
+                return ThreatResult.Fail("malformed_tool_call");
 
-        FunctionCall fn = result.Message.ToolCalls[0]?.Function;
-        if (fn == null || string.IsNullOrEmpty(fn.Name))
-            return ThreatResult.Fail("malformed_tool_call");
+            string choice = fn.Name;
+            return choice is "fight" or "flee" or "freeze"
+                ? ThreatResult.Success(choice)
+                : ThreatResult.Fail($"unknown_choice_{choice}");
+        }
 
-        string choice = fn.Name;
-        return choice is "fight" or "flee" or "freeze"
-            ? ThreatResult.Success(choice)
-            : ThreatResult.Fail($"unknown_choice_{choice}");
+        // Same "be generous — use some regex to see if it's TRYING to
+        // call a tool" leniency as ParseToolCall's own LenientParseFromText
+        // below, applied to this much narrower three-word schema: no
+        // structured call at all, but "I'll fight" or just "flee" sitting
+        // in the plain text content is still a real, recoverable choice,
+        // not a genuine failure. MatchesIntent (shared with
+        // LenientParseFromText) is what keeps "I will NOT flee" from
+        // being misread as choosing flee.
+        string content = result.Message.Content ?? "";
+        string lenientChoice = new[] { "fight", "flee", "freeze" }
+            .FirstOrDefault(c => MatchesIntent(content, c));
+        return lenientChoice != null
+            ? ThreatResult.Success(lenientChoice)
+            : ThreatResult.Fail("no_tool_call");
     }
 
     // The direct-request counterpart to DecideThreatResponse above —
@@ -405,20 +423,239 @@ public class Mind
     // rejected here, explicitly, rather than assumed valid.
     private ParseResult ParseToolCall(ChatMessage message, AvailableTargets targets)
     {
-        if (message.ToolCalls is not { Length: > 0 })
+        if (message.ToolCalls is { Length: > 0 })
+        {
+            FunctionCall fn = message.ToolCalls[0]?.Function;
+            if (fn == null || string.IsNullOrEmpty(fn.Name))
+                return ParseResult.Fail("malformed_tool_call");
+
+            string name = fn.Name;
+            if (Array.IndexOf(ValidActions, name) < 0)
+                return ParseResult.Fail($"unknown_action_{name}");
+
+            string targetId = ExtractField(fn.Arguments, "target_id");
+            Emotion emotion = EmotionExtensions.Parse(ExtractField(fn.Arguments, "emotion"));
+            string item = ExtractField(fn.Arguments, "item");
+            int amount = ParseAmount(fn.Arguments);
+            string spokenMessage = ExtractField(fn.Arguments, "message");
+            return BuildAction(name, targetId, emotion, item, amount, spokenMessage, targets);
+        }
+
+        // "Be generous with these small LLMs trying to call tools — use
+        // some generous regex to see if they're TRYING to call a tool,
+        // to go along with this game easier." A real, observed failure
+        // mode (see the FALLBACK_DISABLED/no_tool_call lines a 3B local
+        // model produces fairly often): rather than using the
+        // provider's real function-calling format, it just narrates
+        // the action in plain prose instead — "I'll light_fire" or
+        // "action: pick_apple tree_2" as ordinary text content, with no
+        // ToolCalls at all. The model's INTENT is still right there in
+        // that text, so this takes one best-effort, deliberately loose
+        // pass at recovering a real action from it before giving up —
+        // see LenientParseFromText's own header for how loose, and why
+        // that's still safe.
+        ParseResult lenient = LenientParseFromText(message.Content, targets);
+        if (lenient.Ok) return lenient;
+
+        return ParseResult.Fail("no_tool_call");
+    }
+
+    // Scans the model's own plain-text reply for the name of one of
+    // ValidActions and, best-effort, a target/item id it's already
+    // allowed to use — no real NLU, just "is one of our exact action
+    // names sitting in this text as a whole word, and does the text
+    // separately happen to contain one of the ids/items actually on
+    // offer right now." Deliberately generous rather than exact: this
+    // is reached ONLY when there was no structured tool call at all
+    // (see ParseToolCall above), so there is nothing more literal left
+    // to try, and a wrong guess here is still caught by BuildAction's
+    // own target/item validation below (the same real trust boundary
+    // the structured path already goes through) — this can recover a
+    // genuine intent, but it can never make an invalid action succeed.
+    // Longest-name-first ordering throughout avoids a short id/action
+    // name winning a spurious match against a longer one that also
+    // appears (e.g. "tree_1" inside "tree_10").
+    //
+    // Two guards keep "generous" from tipping into "wrong": MatchesIntent
+    // below rejects a match with a negation word ("not"/"never"/"don't"/
+    // ...) sitting immediately before it — bare keyword presence alone
+    // can't tell "I will attack" from "I will NOT attack", and short,
+    // common action words (eat/wait/sleep/speak/trade/follow) genuinely
+    // do turn up in ordinary reflective prose that isn't stating a real
+    // decision at all. And "speak" is tried LAST, only once nothing more
+    // specific matched — it's the vaguest possible category (almost any
+    // reply "is" speech in some sense), so letting it win on word length
+    // alone would too easily steal the turn from a real, more specific
+    // intent stated elsewhere in the same text; speak also has no
+    // target/item validation net at all in BuildAction, so a bad match
+    // there just becomes SOME line of in-character dialogue with no
+    // second check to catch it.
+    private ParseResult LenientParseFromText(string content, AvailableTargets targets)
+    {
+        if (string.IsNullOrWhiteSpace(content))
             return ParseResult.Fail("no_tool_call");
 
-        FunctionCall fn = message.ToolCalls[0]?.Function;
-        if (fn == null || string.IsNullOrEmpty(fn.Name))
-            return ParseResult.Fail("malformed_tool_call");
+        string name = ValidActions
+            .Where(a => a != "speak")
+            .OrderByDescending(a => a.Length)
+            .FirstOrDefault(a => MatchesIntent(content, a));
+        if (name == null && MatchesIntent(content, "speak"))
+            name = "speak";
+        if (name == null)
+            return ParseResult.Fail("no_tool_call");
 
-        string name = fn.Name;
-        if (Array.IndexOf(ValidActions, name) < 0)
-            return ParseResult.Fail($"unknown_action_{name}");
+        string targetId = FindMentionedId(content, AllKnownTargetIds(targets));
+        string item = FindMentionedId(content, ItemTypes);
+        // No attempt at a real amount/emotion regex here — a model
+        // that skipped structured tool-calling entirely is unlikely to
+        // state either reliably in prose, and both already have sane
+        // defaults (ParseAmount's "just one" for amount, Parse("")'s
+        // own default for emotion) that the structured path itself
+        // falls back on for exactly the same reason.
+        Emotion emotion = EmotionExtensions.Parse("");
+        // speak has no real target/item concept — if this IS speak,
+        // the "spoken message" is simply whatever the model actually
+        // wrote, since that's genuinely what it's trying to say when
+        // it's answering in plain prose to begin with.
+        string spokenMessage = name == "speak" ? content.Trim() : "";
 
-        string targetId = ExtractField(fn.Arguments, "target_id");
-        Emotion emotion = EmotionExtensions.Parse(ExtractField(fn.Arguments, "emotion"));
+        return BuildAction(name, targetId, emotion, item, 1, spokenMessage, targets);
+    }
 
+    // Natural-language trigger phrases per action, used ONLY by
+    // TryRecoverCommittedAction below — unlike LenientParseFromText's
+    // own scan above (which matches the LITERAL snake_case tool name,
+    // reasonable there since a model that skipped structured tool-
+    // calling entirely often echoes back the exact identifier it just
+    // saw in its own tool schema), a SPOKEN, in-character reply is
+    // ordinary English, not tool-schema vocabulary — nobody actually
+    // says "make_torch" out loud. Reusing LenientParseFromText's own
+    // snake_case scan here (an earlier pass at this genuinely did
+    // exactly that) would silently never fire on real dialogue at all,
+    // which defeats the entire point. Scoped to the handful of actions
+    // most likely to actually come up mid-conversation, not an
+    // exhaustive map for all eighteen — everything else simply isn't
+    // recovered from a hedgy speak reply, which just means the speak
+    // stands as spoken, same as before this existed.
+    private static readonly (string Action, string Phrase)[] SpokenIntentPhrases =
+    {
+        ("make_torch", "make a torch"), ("make_torch", "light a torch"),
+        ("light_fire", "light the fire"), ("light_fire", "light it"),
+        ("cook_meat", "cook the meat"), ("cook_meat", "cook it"),
+        ("follow", "follow you"), ("follow", "come with you"),
+        ("pick_up_stick", "pick up the stick"), ("pick_up_stick", "grab the stick"),
+        ("attack", "fight it"), ("attack", "attack it"),
+        ("eat", "eat it"), ("eat", "eat something"),
+        ("sleep", "get some sleep"), ("sleep", "go to sleep"),
+    };
+
+    // "Nobody decided to make torches even though I gave them sticks —
+    // we need better tool calling, and a regex fallback to parse out
+    // intent if possible." A real, observed case: the model called
+    // speak — a genuinely successful, valid tool call, not a parse
+    // failure ParseToolCall's own no_tool_call fallback would ever see
+    // — but the spoken line was "I'm not sure about making torches...
+    // but maybe I could use it to make one?", clearly reasoning its way
+    // to the right action in words without ever calling it. Scans the
+    // spoken text for the phrases above under the exact same
+    // MatchesIntent guard (hedge/negation/trailing-"?") LenientParseFromText
+    // itself uses, then validates through BuildAction — the same real
+    // target/item/availability trust boundary every other path already
+    // goes through — so "maybe... make one?" correctly recovers nothing
+    // (hedged, and a trailing question) while an unhedged "I'll make a
+    // torch with it" does. Null means "no clearer commitment found in
+    // the words — the speak stands as spoken," not an error; see
+    // NpcAgent.HandleDirectPlayerRequest for the one call site, and why
+    // this is scoped to just the direct-player-request path rather than
+    // every ordinary turn's own speak.
+    public GameAction TryRecoverCommittedAction(string spokenMessage, AvailableTargets targets)
+    {
+        if (string.IsNullOrWhiteSpace(spokenMessage))
+            return null;
+
+        foreach ((string action, string phrase) in SpokenIntentPhrases)
+        {
+            if (!MatchesIntent(spokenMessage, phrase)) continue;
+
+            string targetId = FindMentionedId(spokenMessage, AllKnownTargetIds(targets));
+            string item = FindMentionedId(spokenMessage, ItemTypes);
+            ParseResult result = BuildAction(action, targetId, EmotionExtensions.Parse(""), item, 1, "", targets);
+            if (result.Ok) return result.Action;
+        }
+        return null;
+    }
+
+    // A negation OR hedge word sitting immediately before the match ("I
+    // will NOT attack", "I don't want to sleep yet", "maybe I could
+    // make one?") — not real language understanding, just enough to
+    // catch the likeliest ways a bare keyword-presence scan goes wrong:
+    // mentioning a word is not the same as stating the intent it names,
+    // and neither is musing about it out loud without committing (a
+    // real, observed case: an NPC replied to a direct request with "I'm
+    // not sure about making torches... but maybe I could use it to make
+    // one?" — called speak, not make_torch, despite the fire being lit
+    // and the stick genuinely in hand). Only looks at a short window
+    // right before the match (not the whole sentence) so a hedge
+    // attached to something ELSE earlier in the text doesn't wrongly
+    // veto an unrelated, genuine later match — e.g. "I don't want to
+    // fight, but I will follow Maren" should still recover follow. A
+    // trailing "?" shortly after the match is the same signal from the
+    // other direction — "...to make one?" is a genuine, unsettled
+    // question, not a decision, even with no hedge word anywhere
+    // nearby. Shared by LenientParseFromText above, DecideThreatResponse's
+    // own fight/flee/freeze fallback below, and
+    // NpcAgent.HandleDirectPlayerRequest's "recover a real commitment
+    // from a hedgy speak reply" check.
+    private static readonly string[] HedgeWords =
+    {
+        "not", "never", "no", "n't", "don't", "doesn't", "didn't", "won't", "wouldn't",
+        "shouldn't", "can't", "couldn't", "isn't", "aren't",
+        "maybe", "might", "perhaps", "possibly", "unsure",
+    };
+
+    private static bool MatchesIntent(string content, string word)
+    {
+        Match match = Regex.Match(content, $@"\b{Regex.Escape(word)}\b", RegexOptions.IgnoreCase);
+        if (!match.Success) return false;
+
+        int windowStart = Math.Max(0, match.Index - 25);
+        string before = content.Substring(windowStart, match.Index - windowStart);
+        if (HedgeWords.Any(h => Regex.IsMatch(before, $@"\b{Regex.Escape(h)}\b\W*$", RegexOptions.IgnoreCase)))
+            return false;
+
+        int afterStart = match.Index + match.Length;
+        int afterEnd = Math.Min(content.Length, afterStart + 15);
+        string after = content.Substring(afterStart, afterEnd - afterStart);
+        return !after.Contains('?');
+    }
+
+    private static string FindMentionedId(string content, IEnumerable<string> candidates) =>
+        candidates
+            .Where(id => !string.IsNullOrEmpty(id))
+            .OrderByDescending(id => id.Length)
+            .FirstOrDefault(id => content.Contains(id, StringComparison.OrdinalIgnoreCase)) ?? "";
+
+    private static IEnumerable<string> AllKnownTargetIds(AvailableTargets t) =>
+        (t.TreeIds ?? Array.Empty<string>())
+        .Concat(t.FishingSpotIds ?? Array.Empty<string>())
+        .Concat(t.PineTreeIds ?? Array.Empty<string>())
+        .Concat(t.BerryBushIds ?? Array.Empty<string>())
+        .Concat(t.TravelTargetIds ?? Array.Empty<string>())
+        .Concat(t.NearbyNpcNames ?? Array.Empty<string>())
+        .Concat(t.AnimalIds ?? Array.Empty<string>())
+        .Concat(t.StickIds ?? Array.Empty<string>())
+        .Append("home")
+        .Append("firepit");
+
+    // The single trust boundary between a candidate (name, targetId,
+    // ...) tuple — from either a real structured tool call or
+    // LenientParseFromText's own generous text scan above — and a
+    // GameAction the engine is allowed to act on. An unrecognized
+    // action name or a target that isn't in the world right now is
+    // rejected here, explicitly, rather than assumed valid, regardless
+    // of which path it came from.
+    private ParseResult BuildAction(string name, string targetId, Emotion emotion, string item, int amount, string spokenMessage, AvailableTargets targets)
+    {
         switch (name)
         {
             case "pick_apple":
@@ -453,10 +690,10 @@ public class Mind
                     return ParseResult.Fail($"invalid_target_{targetId}");
                 return ParseResult.Success(new GameAction(name, targetId, ActionRanges.Travel, emotion));
             case "speak":
-                // Named spokenMessage, not message — that name is
-                // already the ChatMessage parameter to this whole
-                // method, and C# doesn't allow shadowing it here.
-                string spokenMessage = ExtractField(fn.Arguments, "message");
+                // spokenMessage arrives as a parameter now — extracted
+                // by whichever caller matched (the real tool-call args,
+                // or LenientParseFromText's own "just use what it
+                // actually wrote" fallback) — not re-extracted here.
                 if (string.IsNullOrWhiteSpace(spokenMessage))
                     return ParseResult.Fail("empty_message");
                 return ParseResult.Success(new GameAction(name, "", 0f, emotion, spokenMessage));
@@ -465,29 +702,21 @@ public class Mind
                     return ParseResult.Fail($"invalid_target_{targetId}");
                 return ParseResult.Success(new GameAction(name, targetId, ActionRanges.Follow, emotion));
             case "trade":
-            {
                 if (Array.IndexOf(targets.NearbyNpcNames, targetId) < 0)
                     return ParseResult.Fail($"invalid_target_{targetId}");
-                string item = ExtractField(fn.Arguments, "item");
                 // Can only ever offer what you actually have — the tool
                 // schema already restricts the enum to carriedItems, but
                 // a small model can still miss the enum, so this is the
                 // real trust boundary, not just the schema.
                 if (Array.IndexOf(targets.CarriedItems, item) < 0)
                     return ParseResult.Fail($"invalid_item_{item}");
-                int amount = ParseAmount(fn.Arguments);
                 return ParseResult.Success(new GameAction(name, targetId, ActionRanges.Trade, emotion, item: item, amount: amount));
-            }
             case "steal":
-            {
                 if (Array.IndexOf(targets.NearbyNpcNames, targetId) < 0)
                     return ParseResult.Fail($"invalid_target_{targetId}");
-                string item = ExtractField(fn.Arguments, "item");
                 if (Array.IndexOf(ItemTypes, item) < 0)
                     return ParseResult.Fail($"invalid_item_{item}");
-                int amount = ParseAmount(fn.Arguments);
                 return ParseResult.Success(new GameAction(name, targetId, ActionRanges.Steal, emotion, item: item, amount: amount));
-            }
             case "attack":
                 if (Array.IndexOf(targets.AnimalIds, targetId) < 0)
                     return ParseResult.Fail($"invalid_target_{targetId}");

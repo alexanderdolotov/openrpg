@@ -198,19 +198,29 @@ public partial class Rabbit : Animal
 
         if (Hunger < MaxHunger * 0.7f)
         {
+            // Berries first (more filling, see the point-value split
+            // below) — grass only considered when there's no bush
+            // within range at all. "Rabbits starving instead of finding
+            // berries or grass to eat" — a handful of bushes shared
+            // across the whole map (and every animal on it) meant an
+            // unlucky rabbit could easily have NOTHING within
+            // DetectionRadius; grass patches are deliberately common
+            // (see Main.BuildWorld/GenerateGrassPatch) specifically as
+            // a fallback that's far more likely to actually be nearby.
             GatherableFoliage bush = FindNearestFoliage(World.BerryBushes, DetectionRadius);
-            if (bush != null)
+            GatherableFoliage food = bush ?? FindNearestFoliage(World.GrassPatches, DetectionRadius);
+            if (food != null)
             {
-                float dist = GlobalPosition.DistanceTo(bush.GlobalPosition);
+                float dist = GlobalPosition.DistanceTo(food.GlobalPosition);
                 if (dist <= EatRange)
                 {
-                    if (bush.AnimalEat())
-                        Hunger = Mathf.Min(MaxHunger, Hunger + 25f);
+                    if (food.AnimalEat())
+                        Hunger = Mathf.Min(MaxHunger, Hunger + (food == bush ? 25f : 12f));
                     _state = State.Wandering;
                 }
                 else
                 {
-                    TargetNode = bush;
+                    TargetNode = food;
                     _state = State.SeekingFood;
                 }
                 return;

@@ -24,6 +24,15 @@ public partial class GatherableFoliage : StaticBody2D, IInteractable, IHasVisual
     [Export] public float TrunkRadius = 10f;
     [Export] public Color Tint = Colors.White; // lets one shared sprite stand in for several distinct-feeling items
 
+    // True for ground cover that every character should be able to
+    // walk straight over — grass, not the pinecone/berry bushes this
+    // same class also renders, which should keep blocking like any
+    // other bush. Skips both the real CollisionShape2D (so movement
+    // physics doesn't stop at it) and this node's own contribution to
+    // IObstacle's pathfinding grid (so NPCs don't detour around it
+    // either) — "no boundaries" means both, not just one.
+    [Export] public bool Walkable = false;
+
     private const float GatherExertion = 3f; // same as AppleTree's
 
     private static readonly Dictionary<string, Texture2D> _textureCache = new();
@@ -34,7 +43,8 @@ public partial class GatherableFoliage : StaticBody2D, IInteractable, IHasVisual
 
     public override void _Ready()
     {
-        AddChild(new CollisionShape2D { Shape = new CircleShape2D { Radius = TrunkRadius } });
+        if (!Walkable)
+            AddChild(new CollisionShape2D { Shape = new CircleShape2D { Radius = TrunkRadius } });
 
         if (!_textureCache.TryGetValue(TexturePath, out Texture2D texture))
         {
@@ -59,6 +69,8 @@ public partial class GatherableFoliage : StaticBody2D, IInteractable, IHasVisual
 
     public IEnumerable<(Vector2, float)> GetObstacleCircles()
     {
+        if (Walkable)
+            yield break;
         yield return (Vector2.Zero, TrunkRadius);
     }
 
