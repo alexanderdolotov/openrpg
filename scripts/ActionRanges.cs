@@ -13,5 +13,7 @@ public static class ActionRanges
     public const float Follow = 90f; // "walking alongside" distance — deliberately looser than a resource-interaction range
     public const float Trade = 70f; // close, hand-to-hand distance
     public const float Steal = 70f; // same — has to actually be within reach
+    public const float Attack = 50f; // close melee range
+    public const float PickUpStick = 40f; // small item on the ground, has to actually be right there
     public const float SleepNearHome = 100f; // "near home" for NPCActor.CanSleep() — looser than Deposit's precise doorstep range, since lying down doesn't need to be exact
 }

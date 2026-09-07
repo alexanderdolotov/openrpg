@@ -19,6 +19,7 @@ public class WorldContext
     // reason TreeIds()/FishingSpotIds() are separate lists too.
     public List<GatherableFoliage> PineTrees;
     public List<GatherableFoliage> BerryBushes;
+    public List<Stick> Sticks;
 
     public Home Home;
 
@@ -38,6 +39,12 @@ public class WorldContext
     // an LLM-driven NPC and the input-driven PlayerCharacter are
     // indistinguishable from here.
     public List<IWorldCharacter> Agents = new();
+
+    // Every living wild animal — Main appends/removes as they spawn and
+    // die (see Main.SpawnAnimal/OnAnimalDied). Shared so a Wolf can find
+    // nearby Rabbits, a Rabbit can find nearby Wolves to flee, etc.,
+    // without each species needing its own separate registry.
+    public List<Animal> Animals = new();
 
     // Bumped by Main whenever exploration-driven generation (see
     // WorldExploration) adds a new tree or fishing spot after boot.

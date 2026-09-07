@@ -119,7 +119,44 @@ public partial class NpcAgent : Node, IWorldCharacter
     {
         if (_thinking) return;
         _thinking = true;
-        _uiLog($"[{Personality.Name}] ...thinking...", "6f8068");
+
+        // While incapacitated, there's nothing to decide — and
+        // AssignAction() silently refuses to assign anything while
+        // Actor.IsDown regardless (see its own comment), so deciding
+        // anyway would just waste a real LLM call. Waiting it out HERE,
+        // rather than letting that silent refusal happen, is also what
+        // lets the turn loop actually resume once NPCActor's own
+        // ProcessIncapacitated() clears it — an assign attempt that
+        // goes nowhere never calls Finish(), and Finish() firing
+        // ActionCompleted is the ONLY thing that ever calls TakeTurn()
+        // again; without this wait, one incapacitation would silently
+        // and permanently stall this NPC's whole turn loop, even long
+        // after it physically recovers.
+        while (Actor.IsDown)
+        {
+            if (GameSettings.PermadeathEnabled)
+            {
+                // Permanently down under permadeath — never recovers.
+                // Stop trying entirely rather than poll forever waiting
+                // for a recovery that isn't coming.
+                _thinking = false;
+                return;
+            }
+            _uiLog($"[{Personality.Name}] ...down, waiting to recover...", "6f8068");
+            await Actor.ToSignal(Actor.GetTree().CreateTimer(3f, processAlways: false), SceneTreeTimer.SignalName.Timeout);
+        }
+
+        // Checked before anything else this turn commits to — "the LLM
+        // can't choose to go pick berries while a wolf is attacking
+        // them." Doesn't skip the perception-building steps below
+        // (heard speech, witnessed events, discovery) — those still
+        // happen and still get remembered — it just means what
+        // happens with that perception afterward is the narrow fight/
+        // flee/freeze decision (HandleThreatTurn) instead of the
+        // normal full-menu one.
+        List<Animal> threats = ActiveThreats();
+        bool underThreat = threats.Count > 0;
+        _uiLog(underThreat ? $"[{Personality.Name}] ...thinking (danger!)..." : $"[{Personality.Name}] ...thinking...", underThreat ? "e0876b" : "6f8068");
 
         NoticeInventoryChanges();
         Memory.Record("location", DescribeLocation());
@@ -161,8 +198,27 @@ public partial class NpcAgent : Node, IWorldCharacter
         }
 
         string perception = BuildPerception();
-        bool sleepAllowed = Actor.CanSleep(_world.Home.GlobalPosition);
-        var targets = new Mind.AvailableTargets(TreeIds(), FishingSpotIds(), PineTreeIds(), BerryBushIds(), TravelTargetIds(), NearbyNpcNames(), CarriedItems(), sleepAllowed);
+
+        if (underThreat)
+        {
+            await HandleThreatTurn(threats, perception);
+            return;
+        }
+
+        var targets = new Mind.AvailableTargets
+        {
+            TreeIds = TreeIds(),
+            FishingSpotIds = FishingSpotIds(),
+            PineTreeIds = PineTreeIds(),
+            BerryBushIds = BerryBushIds(),
+            TravelTargetIds = TravelTargetIds(),
+            NearbyNpcNames = NearbyNpcNames(),
+            CarriedItems = CarriedItems(),
+            SleepAllowed = Actor.CanSleep(_world.Home.GlobalPosition),
+            AnimalIds = AnimalIds(),
+            StickIds = StickIds(),
+            EatAllowed = Actor.CanEat(),
+        };
         var result = await Mind.Decide(perception, targets, Personality);
         _thinking = false;
 
@@ -282,6 +338,218 @@ public partial class NpcAgent : Node, IWorldCharacter
         return _berryBushIds;
     }
 
+    // NOT cached the way trees/bushes are — animals actually move
+    // every frame (and can die at any time), so a list keyed off
+    // ContentVersion alone would go stale the instant one wanders out
+    // of range without anything having spawned or died. Same "recompute
+    // every turn" treatment as NearbyNpcNames() below, for the same
+    // reason.
+    private string[] AnimalIds()
+    {
+        var ids = new List<string>();
+        foreach (Animal a in _world.Animals)
+            if (Actor.GlobalPosition.DistanceTo(a.GlobalPosition) <= SpeechLog.HearingRadius)
+                ids.Add(a.WorldId);
+        return ids.ToArray();
+    }
+
+    // --- fight / flee / freeze ---
+    //
+    // The whole thing lives here, not in NPCActor — NPCActor is the
+    // tactical layer (it doesn't know about Animal or WorldContext at
+    // all); this is a mind-layer decision like any other, just a
+    // much narrower and more urgent one than TakeTurn()'s normal
+    // path. See TakeTurn()'s own ActiveThreats() check for where this
+    // gets entered.
+
+    // "Under threat" for FFF purposes is deliberately NOT
+    // Actor.UnderThreat (that's a rolling window off the last landed
+    // HIT, built for CanSleep()'s narrower "in fight mode" question).
+    // This is broader and more proactive: an animal that's actively
+    // chasing or already swinging at THIS actor counts immediately,
+    // even before it's landed a single hit — "a wolf is attacking
+    // them" reads as the wolf's own behavior, not as "and it already
+    // connected once."
+    private List<Animal> ActiveThreats()
+    {
+        var threats = new List<Animal>();
+        foreach (Animal a in _world.Animals)
+        {
+            if (!IsInstanceValid(a) || a.IsDown) continue;
+            if (ReferenceEquals(a.CurrentTarget, Actor) &&
+                (a.CurrentState == Animal.State.Chasing || a.CurrentState == Animal.State.Attacking))
+                threats.Add(a);
+        }
+        return threats;
+    }
+
+    // Invalidates any FFF decision still in flight from an earlier
+    // call to HandleThreatTurn() the moment a newer one starts — see
+    // its own use below.
+    private ulong _threatToken;
+
+    private async Task HandleThreatTurn(List<Animal> threats, string perception)
+    {
+        ulong myToken = ++_threatToken;
+
+        // The instant reflex — fires now, before any round trip to the
+        // model, so "a wolf just started coming for me" never leaves
+        // this NPC just standing there while the real (comparatively
+        // slow) decision is still in flight. "Choose default first
+        // option like fight back, until LLM decides and get back with
+        // another option to interrupt behavior" — AssignAction()
+        // doesn't require the actor to be Idle first, so the real
+        // decision below is free to overwrite this the moment it
+        // arrives, exactly as asked for.
+        GameAction reflex = DefaultReflexAction(threats);
+        _uiLog($"[{Personality.Name}] reflex: {reflex.Id}{(reflex.TargetId != "" ? $" -> {reflex.TargetId}" : "")}", "e0876b");
+        _thoughtLog.Log(Personality.Name, "THREAT_REFLEX", reflex.Id);
+        Actor.AssignAction(reflex);
+
+        Mind.ThreatResult result = await Mind.DecideThreatResponse(perception, Personality);
+        _thinking = false;
+
+        // Superseded by a newer threat turn (another hit landed, this
+        // NPC moved on some other way) while this was still in
+        // flight — a late-arriving decision from an earlier moment
+        // shouldn't override whatever's actually happening now.
+        if (myToken != _threatToken) return;
+        if (Actor.IsDown) return;
+
+        // The threat that started this could be dead or gone by the
+        // time the decision comes back — re-check rather than trust
+        // the list captured when this call started.
+        threats = ActiveThreats();
+        if (threats.Count == 0) return;
+
+        string choice;
+        if (result.Ok)
+        {
+            choice = result.Choice;
+            _uiLog($"[{Personality.Name}] decides (danger): {choice}", "a9c9e8");
+            _thoughtLog.Log(Personality.Name, "THREAT_DECISION", choice);
+        }
+        else
+        {
+            choice = RandomThreatFallback(threats);
+            _uiLog($"[{Personality.Name}] mind unreachable during danger ({result.Error}) -> random: {choice}", "e0c66a");
+            _thoughtLog.Log(Personality.Name, "THREAT_FALLBACK", $"{result.Error} -> {choice}");
+        }
+
+        string finalChoice = MaybeInstinctOverride(choice, Actor.Stats.IntelligenceMod);
+        if (finalChoice != choice)
+        {
+            _uiLog($"[{Personality.Name}] panics and {finalChoice}s instead", "e0876b");
+            _thoughtLog.Log(Personality.Name, "THREAT_INSTINCT_OVERRIDE", $"{choice} -> {finalChoice}");
+        }
+
+        GameAction chosen = MapThreatChoiceToAction(finalChoice, threats);
+        string targetNote = chosen.TargetId != "" ? $" -> {chosen.TargetId}" : "";
+        _uiLog($"[{Personality.Name}] attempting: {chosen.Id}{targetNote}", "d8ddd0");
+        _thoughtLog.Log(Personality.Name, "ACTION_ATTEMPT", $"{chosen.Id}{targetNote}");
+        Actor.AssignAction(chosen);
+    }
+
+    // The reflexive default — always "fight the nearest threat,"
+    // exactly as asked for ("choose default first option like fight
+    // back"). Not personality- or stat-aware on purpose: a genuine
+    // reflex fires before there's been any time to weigh strength,
+    // odds, or temperament — that weighing is what the real decision
+    // (LLM, or the stat-weighted random fallback) is for.
+    private GameAction DefaultReflexAction(List<Animal> threats)
+    {
+        Animal nearest = threats.OrderBy(a => Actor.GlobalPosition.DistanceTo(a.GlobalPosition)).First();
+        return new GameAction("attack", nearest.WorldId, ActionRanges.Attack);
+    }
+
+    // "If health is low or too many wolves, FLEE or FREEZE should be
+    // weighed higher" — only reached when the mind itself couldn't be
+    // reached at all (DecideThreatResponse failed outright), not a
+    // general substitute for asking it.
+    private string RandomThreatFallback(List<Animal> threats)
+    {
+        int weightFight = 3, weightFlee = 3, weightFreeze = 2;
+        if (Actor.Vitals.Health < 40f) { weightFight -= 2; weightFlee += 2; weightFreeze += 1; }
+        if (threats.Count > 1) { weightFight -= 1; weightFlee += 2; }
+        weightFight = Math.Max(1, weightFight);
+
+        int total = weightFight + weightFlee + weightFreeze;
+        int roll = Rng.Next(total);
+        if (roll < weightFight) return "fight";
+        if (roll < weightFight + weightFlee) return "flee";
+        return "freeze";
+    }
+
+    // "Bad choices" from low Intelligence — a chance, inversely tied
+    // to IntelligenceMod, that instinct overrides whatever was
+    // actually decided (by the LLM OR the random fallback above) with
+    // something worse. A sharp character (+4ish) almost never panics
+    // this way; a dull one (-4ish) does more than half the time.
+    // Deliberately never a NO-OP roll (picking the same choice again
+    // would just be indistinguishable from not overriding at all).
+    private string MaybeInstinctOverride(string choice, int intelligenceMod)
+    {
+        float overrideChance = Mathf.Clamp(0.3f - intelligenceMod * 0.07f, 0.05f, 0.55f);
+        if (Rng.NextDouble() >= overrideChance) return choice;
+
+        string[] alternatives = choice switch
+        {
+            "fight" => new[] { "freeze" },
+            "flee" => new[] { "fight", "freeze" },
+            _ => new[] { "fight" }, // freeze overridden by a panicked lunge — the classic bad instinct
+        };
+        return alternatives[Rng.Next(alternatives.Length)];
+    }
+
+    private GameAction MapThreatChoiceToAction(string choice, List<Animal> threats)
+    {
+        switch (choice)
+        {
+            case "fight":
+                Animal nearest = threats.OrderBy(a => Actor.GlobalPosition.DistanceTo(a.GlobalPosition)).First();
+                return new GameAction("attack", nearest.WorldId, ActionRanges.Attack);
+            case "flee":
+                return new GameAction("flee", "", 0f, destination: ComputeFleeDestination(threats));
+            default: // "freeze"
+                return new GameAction("wait", "", 0f);
+        }
+    }
+
+    // A point roughly opposite the average direction of every current
+    // threat, far enough to actually put distance between them, kept
+    // inside the generated map — no point fleeing toward a boundary
+    // that doesn't actually help.
+    private Vector2 ComputeFleeDestination(List<Animal> threats)
+    {
+        Vector2 avgThreatPos = Vector2.Zero;
+        foreach (Animal a in threats) avgThreatPos += a.GlobalPosition;
+        avgThreatPos /= threats.Count;
+
+        Vector2 away = Actor.GlobalPosition - avgThreatPos;
+        if (away.LengthSquared() < 1f) away = new Vector2(1f, 0f); // degenerate: standing right on top of the threat — any direction beats dividing by ~zero
+        away = away.Normalized();
+
+        Vector2 dest = Actor.GlobalPosition + away * 320f;
+        Rect2 bounds = WorldExploration.MaxMapBounds;
+        dest.X = Mathf.Clamp(dest.X, bounds.Position.X + 40f, bounds.Position.X + bounds.Size.X - 40f);
+        dest.Y = Mathf.Clamp(dest.Y, bounds.Position.Y + 40f, bounds.Position.Y + bounds.Size.Y - 40f);
+        return dest;
+    }
+
+    private string[] _stickIds;
+    private int _stickIdsVersion = -1;
+    private string[] StickIds()
+    {
+        if (_stickIds == null || _stickIdsVersion != _world.ContentVersion)
+        {
+            _stickIds = new string[_world.Sticks.Count];
+            for (int i = 0; i < _stickIds.Length; i++)
+                _stickIds[i] = _world.Sticks[i].WorldId;
+            _stickIdsVersion = _world.ContentVersion;
+        }
+        return _stickIds;
+    }
+
     private string[] _travelTargetIds;
     private string[] TravelTargetIds()
     {
@@ -371,6 +639,12 @@ public partial class NpcAgent : Node, IWorldCharacter
             yield return ($"pine_{i}", _world.PineTrees[i].GlobalPosition);
         for (int i = 0; i < _world.BerryBushes.Count; i++)
             yield return ($"berry_{i}", _world.BerryBushes[i].GlobalPosition);
+        // Animals deliberately excluded — SpatialMemory is about
+        // static locations ("have I been near X before"), and an
+        // animal never sits still long enough for that to mean
+        // anything.
+        foreach (Stick s in _world.Sticks)
+            yield return (s.WorldId, s.GlobalPosition);
         yield return ("home", _world.Home.GlobalPosition);
         foreach (KeyValuePair<string, Node2D> kv in _world.Flagpoles)
             yield return (kv.Key, kv.Value.GlobalPosition);
@@ -449,6 +723,36 @@ public partial class NpcAgent : Node, IWorldCharacter
                 lines.Add($"{other.DisplayName} is nearby, {dist} px away, feeling {other.CurrentEmotion.ToWireString()}.");
         }
 
+        // Wild animals — same hearing-range scoping as everyone above.
+        // Framed with enough to actually judge the situation (species,
+        // distance, whether it's actively coming for YOU specifically)
+        // without exposing raw internal numbers (Hunger%, Health) that
+        // would just be noise to reason about — "it looks hostile" is
+        // the actionable fact, not the number behind it.
+        foreach (Animal a in _world.Animals)
+        {
+            int dist = (int)Actor.GlobalPosition.DistanceTo(a.GlobalPosition);
+            if (dist > SpeechLog.HearingRadius)
+                continue;
+            string species = a switch { Wolf => "wolf", Bear => "bear", Rabbit => "rabbit", _ => "animal" };
+            bool comingForMe = (a.CurrentState == Animal.State.Attacking || a.CurrentState == Animal.State.Chasing) && a.CurrentTarget == Actor;
+            string note = comingForMe ? " — it's coming for YOU, right now!" : species == "rabbit" ? " — harmless, just foraging." : "";
+            lines.Add($"{a.WorldId} ({species}): {dist} px away{note}");
+        }
+
+        // Sticks on the ground — NOT AppendNearestResources (that
+        // reconstructs "{prefix}_{list index}", which breaks here the
+        // same way it would for animals: a stick can be picked up from
+        // the middle of the list, shifting every later index. Sticks
+        // are few enough that "every one within range" (not just
+        // nearest-N) is fine to list in full.
+        foreach (Stick s in _world.Sticks)
+        {
+            int dist = (int)Actor.GlobalPosition.DistanceTo(s.GlobalPosition);
+            if (dist <= SpeechLog.HearingRadius)
+                lines.Add($"{s.WorldId} (stick): {dist} px away, lying on the ground.");
+        }
+
         lines.Add($"You are carrying: {Actor.Inventory.Describe()}.");
         lines.Add($"You are currently feeling {Actor.CurrentEmotion.ToWireString()}.");
         // Full self-awareness of your own stats and condition — same
@@ -512,6 +816,13 @@ public partial class NpcAgent : Node, IWorldCharacter
         // mind reachable to actually decide anything.
         if (Actor.Vitals.NeedsSleep)
             return new GameAction("sleep", "", 0f);
+
+        // Same reasoning as sleep above — eating below 80% Health is a
+        // physical need, not a choice, so it belongs ahead of deposit
+        // here too. CanEat() already checks both the health threshold
+        // and that there's actually food in Inventory.
+        if (Actor.CanEat())
+            return new GameAction("eat", "", 0f);
 
         if (Actor.Inventory.All.Count > 0)
             return new GameAction("deposit", "home", ActionRanges.Deposit);
@@ -627,7 +938,11 @@ public partial class NpcAgent : Node, IWorldCharacter
             "deposit" => $"{Personality.Name} deposits their haul at home.",
             "travel" => $"{Personality.Name} arrives at {targetId}.",
             "follow" => $"{Personality.Name} walks up alongside {targetId}.",
+            "attack" => $"{Personality.Name} strikes {targetId}!",
+            "eat" => $"{Personality.Name} eats something to recover.",
+            "pick_up_stick" => $"{Personality.Name} picks up a stick.",
             "sleep" => $"{Personality.Name} was asleep nearby for a while.",
+            "flee" => $"{Personality.Name} flees in a panic!",
             _ => null,
         };
         if (description != null)
@@ -725,7 +1040,18 @@ public partial class NpcAgent : Node, IWorldCharacter
         // by the time this line runs, NPCActor.ProcessSleeping() has
         // already held it in State.Sleeping for a real 20 seconds, so
         // adding yet another pause on top would just be stacking delays.
-        double pause = actionId == "wait" ? 1.0 : MinTurnPause;
+        // "attacked"/"attacked_while_sleeping" get NO pause at all —
+        // these mean NPCActor.ReceiveDamage() just interrupted
+        // whatever was happening because something is actively
+        // attacking this NPC right now, and the very next TakeTurn()
+        // is what routes into the fight/flee/freeze reflex (see
+        // ActiveThreats()/HandleThreatTurn()). Waiting out the normal
+        // pacing floor first would turn "instant reflex" into
+        // "reflex, but only after standing there taking a free hit for
+        // several seconds first."
+        double pause = (reason == "attacked" || reason == "attacked_while_sleeping") ? 0.0
+            : actionId == "wait" ? 1.0
+            : MinTurnPause;
         await Actor.ToSignal(Actor.GetTree().CreateTimer(pause, processAlways: false), SceneTreeTimer.SignalName.Timeout);
 
         await TakeTurn();

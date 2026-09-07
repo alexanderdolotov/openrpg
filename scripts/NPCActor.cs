@@ -7,10 +7,18 @@ using System.Collections.Generic;
 // asking the mind anything again until the action is truly resolved.
 // That resolution (success or a terminal failure) is the only thing
 // that goes back upstream, via ActionCompleted.
-public partial class NPCActor : CharacterBody2D
+public partial class NPCActor : CharacterBody2D, ICombatant
 {
     [Signal]
     public delegate void ActionCompletedEventHandler(Godot.Collections.Dictionary result);
+
+    // Only ever emitted under GameSettings.PermadeathEnabled — see
+    // ReceiveDamage(). Main listens for this on every NPC and the
+    // player to actually remove them from the game / show a real
+    // game-over, since NPCActor itself has no way to unregister from
+    // WorldRegistry or stop its own NpcAgent's turn loop.
+    [Signal]
+    public delegate void DownedEventHandler();
 
     private const float Speed = 120f;
     private const float UnreachableTimeout = 10f; // seconds spent closing distance before giving up — sized for the longest realistic walk (home to the far fishing spot, ~770px), not the old tighter layout
@@ -25,10 +33,31 @@ public partial class NPCActor : CharacterBody2D
     // only runs when _state == Idle, so giving sleep a distinct non-Idle
     // state is what makes a sleeping player immobile for free, with no
     // separate "don't let WASD move you right now" check needed.
-    protected enum State { Idle, Navigating, Attempting, Sleeping }
+    protected enum State { Idle, Navigating, Attempting, Sleeping, Incapacitated }
     protected State _state = State.Idle;
 
     public GameAction CurrentAction;
+
+    // "In fight mode" for a while after actually taking a hit, not
+    // forever, and not just from being near something dangerous — a
+    // real bidirectional "still targeting me?" link back to whichever
+    // Animal is attacking would need signaling both ways for no real
+    // benefit; a rolling time window off the last hit already answers
+    // "am I currently under threat" correctly for CanSleep()'s purposes
+    // (an animal that gave up the chase stops landing hits, and this
+    // clears itself a few seconds later).
+    private float _timeSinceAttacked = 999f;
+    private const float ThreatWindowSeconds = 8f;
+    public bool UnderThreat => _timeSinceAttacked < ThreatWindowSeconds;
+
+    // Whoever landed the most recent hit — read by NpcAgent's fight/
+    // flee/freeze handling the same way Animal.LastAttacker already
+    // lets a species' own DecideBehavior() know who to defend against.
+    // Not cleared on a timer the way _timeSinceAttacked/UnderThreat is;
+    // a stale reference here is harmless since nothing reads this
+    // without also checking UnderThreat (or, for FFF, its own fresh
+    // ActiveThreats() scan) first.
+    public ICombatant LastAttacker { get; private set; }
 
     // Every item this character is carrying, of any type and count.
     // Shared, unmodified, by every subclass — this is exactly the kind
@@ -118,6 +147,13 @@ public partial class NPCActor : CharacterBody2D
     private List<Vector2> _waypoints;
     private int _waypointIndex;
     private const float WaypointTolerance = 14f;
+
+    // "flee" walks toward a computed point, not a WorldRegistry entity
+    // — there's nothing to look up (see GameAction.Destination's own
+    // comment), so ProcessNavigating() reads this instead of
+    // _targetNode.GlobalPosition when it's set.
+    private Vector2? _fleeDestination;
+    private const float FleeArrivalRange = 24f;
 
     // CharacterBody2D has always been calling MoveAndSlide() — it just
     // had nothing to slide against, since nothing here or anywhere else
@@ -252,11 +288,158 @@ public partial class NPCActor : CharacterBody2D
     // desperate enough to just lie down in a field).
     public bool CanSleep(Vector2 homePosition)
     {
+        // "Cannot sleep while in fight mode" — checked first, overrides
+        // every other tier: exhausted or not, near home or not, lying
+        // down while something's actively after you is never on offer.
+        if (UnderThreat)
+            return false;
         if (Vitals.Fatigue > Vitals.SleepUnnecessaryThreshold)
             return false;
         if (Vitals.NeedsSleep)
             return true;
         return GlobalPosition.DistanceTo(homePosition) <= ActionRanges.SleepNearHome;
+    }
+
+    // The Health-side equivalent of CanSleep() — offered once Health
+    // starts actually dropping, not only once it's critical, and only
+    // when there's real food on hand to eat (Food.BestFoodIn already
+    // returns null otherwise, so this can't offer a dead-end choice).
+    public const float EatHealthThreshold = 80f;
+    public bool CanEat() => Vitals.Health < EatHealthThreshold && Food.BestFoodIn(Inventory) != null;
+
+    // --- ICombatant ---
+    public int StrengthMod => Stats.StrengthMod;
+    public int DexterityMod => Stats.DexterityMod;
+
+    // Already down either way (knocked out and waiting to recover, or
+    // permanently down under permadeath) — either reads as "can't be
+    // attacked again" to Combat's own target-availability checks.
+    public bool IsDown => _state == State.Incapacitated || _permanentlyDown;
+    private bool _permanentlyDown = false;
+
+    private const float IncapacitatedDuration = 15f;
+
+    // The one place ANY damage to a human — animal attack, later maybe
+    // player-vs-player — actually lands. Interrupts whatever this
+    // character was doing (including, per "if attacked, will always
+    // wake up from sleep," Sleeping specifically) and, once Health
+    // bottoms out, either knocks them out (recoverable) or puts them
+    // permanently down, depending on GameSettings.PermadeathEnabled.
+    public void ReceiveDamage(int amount, ICombatant attacker = null)
+    {
+        if (IsDown) return; // already down, no piling on
+        _timeSinceAttacked = 0f; // drives UnderThreat — "cannot sleep while in fight mode"
+        LastAttacker = attacker;
+
+        // A hit interrupts whatever this character was doing —
+        // sleeping always ends on one ("if attacked, will always wake
+        // up from sleep"), and so does any other PEACEFUL action in
+        // progress (walking to a tree, mid-gather, mid-travel, an
+        // earlier "freeze" wait, ...): "the LLM can't choose to pick
+        // berries while a wolf is attacking them." An already
+        // in-progress "attack" or "flee" is deliberately exempt from
+        // this, though — those ARE the combat response already under
+        // way, and unconditionally restarting the decision on every
+        // single incoming hit would mean neither could ever actually
+        // resolve: a wolf's own attack cooldown (1.2s) is faster than
+        // a human's own AttemptDuration (1.5s), so attacking back
+        // could never land a hit, and fleeing could never actually put
+        // distance behind it, if every hit taken along the way kept
+        // canceling it first and restarting the decision from
+        // scratch. Confirmed as a real bug this way, empirically, not
+        // just reasoned about — a real wolf genuinely could not be
+        // fought off before this exemption was added. Every branch
+        // that DOES interrupt goes through the same Finish(), which
+        // fires ActionCompleted right away — NpcAgent's
+        // OnActionCompleted gives the "attacked"/"attacked_while_sleeping"
+        // reasons a zero-pause fast path specifically so this reads as
+        // an instant reflex, not a decision that waits behind the
+        // normal per-turn pacing.
+        bool wasSleeping = _state == State.Sleeping;
+        bool isCombatInProgress = !wasSleeping && CurrentAction != null &&
+            (CurrentAction.Id == "attack" || CurrentAction.Id == "flee");
+        bool wasActing = CurrentAction != null;
+        if (wasSleeping)
+        {
+            EndSleepVisual();
+            Finish(false, "attacked_while_sleeping");
+        }
+        else if (wasActing && !isCombatInProgress)
+        {
+            Finish(false, "attacked");
+        }
+
+        Vitals.Damage(amount);
+        if (!Vitals.IsIncapacitated)
+            return;
+
+        // Whatever was in progress needs to resolve/notify one way or
+        // another before this character goes down — either it was
+        // already interrupted above (Finish() already called,
+        // CurrentAction now null, nothing left to do here), or it was
+        // an exempted attack/flee still in flight when the killing
+        // blow landed, which still needs its own Finish() right here —
+        // skipping it would mean ActionCompleted never fires for that
+        // action at all, and NpcAgent's own turn loop (which only ever
+        // resumes via that signal) would silently stall forever
+        // waiting for a call that was never coming, the same class of
+        // bug already found and fixed in TakeTurn()'s own
+        // incapacitation wait loop.
+        if (CurrentAction != null)
+            Finish(false, "incapacitated");
+
+        if (GameSettings.PermadeathEnabled)
+        {
+            _permanentlyDown = true;
+            Velocity = Vector2.Zero;
+            BeginIncapacitatedVisual(permanent: true);
+            EmitSignal(SignalName.Downed);
+        }
+        else
+        {
+            _state = State.Incapacitated; // overrides whatever Finish() above left _state as (Idle) — single-threaded, so nothing runs between the two
+            _elapsed = 0f;
+            BeginIncapacitatedVisual(permanent: false);
+        }
+    }
+
+    private void ProcessIncapacitated(float delta)
+    {
+        // No movement, same as Sleeping — being knocked out is
+        // immobile by construction, not a separate "don't let WASD
+        // move you" check.
+        _elapsed += delta;
+        if (_elapsed < IncapacitatedDuration)
+            return;
+
+        Vitals.RecoverFromKnockout();
+        EndIncapacitatedVisual();
+        _state = State.Idle;
+    }
+
+    // Reuses the same "lying down" rotation Sleeping already uses (no
+    // separate knocked-out/dead pose to draw) but a different emoji
+    // than 💤 so the two read as visually distinct at a glance — 💫 for
+    // a recoverable knockout, 💀 when GameSettings.PermadeathEnabled
+    // made this real. Same emotion-token-bump trick BeginSleepVisual()
+    // uses, for the same reason (a stale mood-change hide-timer
+    // shouldn't be able to wipe this mid-recovery either).
+    private void BeginIncapacitatedVisual(bool permanent)
+    {
+        _sprite.RotationDegrees = 90f;
+        if (_emotionLabel != null)
+        {
+            _emotionToken++;
+            _emotionLabel.Text = permanent ? "💀" : "💫";
+            _emotionLabel.Visible = true;
+        }
+    }
+
+    private void EndIncapacitatedVisual()
+    {
+        _sprite.RotationDegrees = 0f;
+        if (_emotionLabel != null)
+            _emotionLabel.Visible = false;
     }
 
     // Called once, right after construction — NpcFactory picks a variant
@@ -294,8 +477,24 @@ public partial class NPCActor : CharacterBody2D
 
     public void AssignAction(GameAction action)
     {
+        // Can't act while down — ProcessIncapacitated() clears this on
+        // its own after IncapacitatedDuration, or (permadeath) never.
+        // Without this, an NpcAgent turn that fires again mid-recovery
+        // (its own TakeTurn() already avoids this — see the "while
+        // (Actor.IsDown)" wait loop there — but nothing stops a stray
+        // call otherwise) would silently overwrite Incapacitated with
+        // whatever it just decided.
+        if (_state == State.Incapacitated)
+            return;
+
         CurrentAction = action;
         _elapsed = 0f;
+        // Cleared unconditionally on every new assignment, not just a
+        // non-flee one — otherwise a stale point from an EARLIER flee
+        // would silently keep steering ProcessNavigating() for
+        // whatever gets assigned next, since flee's own branch below
+        // is the only thing that ever sets this again.
+        _fleeDestination = null;
 
         // Checked before the generic targetless branch below — sleep is
         // ALSO targetless, but needs its own dedicated state (real
@@ -305,6 +504,21 @@ public partial class NPCActor : CharacterBody2D
         {
             _state = State.Sleeping;
             BeginSleepVisual();
+            return;
+        }
+
+        // "flee" — a fight/flee/freeze response with nowhere real to
+        // look up (see GameAction.Destination's own comment): walk
+        // straight toward a computed point rather than any registered
+        // entity, no A* routing (getting clear of danger fast matters
+        // more here than a tidy route around obstacles).
+        if (action.Id == "flee")
+        {
+            _fleeDestination = action.Destination ?? GlobalPosition;
+            _targetNode = null;
+            _waypoints = null;
+            _waypointIndex = 0;
+            _state = State.Navigating;
             return;
         }
 
@@ -327,17 +541,17 @@ public partial class NPCActor : CharacterBody2D
 
         // "travel" is the flagpole case — the path is unknown by
         // design, not a grid-coverage gap, so it always walks straight
-        // at the target. "follow", "trade", and "steal" all target a
-        // MOVING NPCActor (or PlayerCharacter — same class) — a path
-        // computed once at the instant this action starts would go
-        // stale the moment the target takes a step, so all three always
-        // walk straight at wherever the target currently is too (the
-        // same live GlobalPosition read every physics frame that
-        // already makes following work at all). Everything else is a
-        // "known," stationary destination and routes through A* when a
-        // route exists; a null result (no path found) falls back to the
-        // same direct movement.
-        _waypoints = (action.Id == "travel" || action.Id == "follow" || action.Id == "trade" || action.Id == "steal")
+        // at the target. "follow", "trade", "steal", and "attack" all
+        // target something that MOVES (an NPCActor/PlayerCharacter, or
+        // an Animal) — a path computed once at the instant this action
+        // starts would go stale the moment the target takes a step, so
+        // all four always walk straight at wherever the target
+        // currently is too (the same live GlobalPosition read every
+        // physics frame that already makes following work at all).
+        // Everything else is a "known," stationary destination and
+        // routes through A* when a route exists; a null result (no path
+        // found) falls back to the same direct movement.
+        _waypoints = (action.Id == "travel" || action.Id == "follow" || action.Id == "trade" || action.Id == "steal" || action.Id == "attack")
             ? null
             : PathGrid.FindPath(GlobalPosition, _targetNode.GlobalPosition);
         _waypointIndex = 0;
@@ -354,6 +568,7 @@ public partial class NPCActor : CharacterBody2D
         // here when Idle, since the switch below has no Idle case) and
         // only branches on input handling after.
         Vitals.DecayOverTime((float)delta);
+        _timeSinceAttacked += (float)delta;
 
         switch (_state)
         {
@@ -366,13 +581,16 @@ public partial class NPCActor : CharacterBody2D
             case State.Sleeping:
                 ProcessSleeping((float)delta);
                 break;
+            case State.Incapacitated:
+                ProcessIncapacitated((float)delta);
+                break;
         }
 
-        // Sleeping drives its own visual (rotated sprite, no walk/idle
-        // switching) via BeginSleepVisual()/EndSleepVisual() — skip the
-        // normal facing/animation logic entirely while asleep instead of
-        // fighting it every frame.
-        if (_state != State.Sleeping)
+        // Sleeping/Incapacitated both drive their own visual (rotated
+        // sprite, no walk/idle switching) via their own Begin/End visual
+        // methods — skip the normal facing/animation logic entirely
+        // instead of fighting it every frame.
+        if (_state != State.Sleeping && _state != State.Incapacitated)
             UpdateSpriteFacing();
     }
 
@@ -431,20 +649,33 @@ public partial class NPCActor : CharacterBody2D
     {
         _elapsed += delta;
 
-        if (_targetNode == null || !IsInstanceValid(_targetNode))
+        Vector2 finalTarget;
+        float arrivalRange;
+        if (_fleeDestination.HasValue)
         {
-            Finish(false, "target_not_found");
-            return;
+            // No entity to go stale on (see AssignAction's flee
+            // branch) — a computed point is always "still there."
+            finalTarget = _fleeDestination.Value;
+            arrivalRange = FleeArrivalRange;
+        }
+        else
+        {
+            if (_targetNode == null || !IsInstanceValid(_targetNode))
+            {
+                Finish(false, "target_not_found");
+                return;
+            }
+            finalTarget = _targetNode.GlobalPosition;
+            arrivalRange = CurrentAction.Range;
         }
 
-        Vector2 finalTarget = _targetNode.GlobalPosition;
         float distToFinal = GlobalPosition.DistanceTo(finalTarget);
 
         // Arriving within Range always wins, regardless of whether a
         // path is still being followed — a route that happens to pass
         // close to the target shouldn't force walking all the way to
         // the last waypoint first.
-        if (distToFinal <= CurrentAction.Range)
+        if (distToFinal <= arrivalRange)
         {
             Velocity = Vector2.Zero;
             _state = State.Attempting;
@@ -493,7 +724,24 @@ public partial class NPCActor : CharacterBody2D
 
         // sleep no longer comes through here at all — AssignAction()
         // routes it straight to State.Sleeping, since it needs a real
-        // duration and immobility, not an instant resolve.
+        // duration and immobility, not an instant resolve. eat IS
+        // targetless (there's nowhere to walk to, just something in
+        // your own pack) but still needs real handling, so it's
+        // intercepted here, before the generic no-op branch below.
+        if (CurrentAction.Id == "eat")
+        {
+            string food = Food.BestFoodIn(Inventory);
+            if (food == null)
+            {
+                Finish(false, "no_food");
+                return;
+            }
+            Inventory.Remove(food, 1);
+            Vitals.Health = Mathf.Min(100f, Vitals.Health + Food.HealthFor(food));
+            Finish(true, "ok", new Godot.Collections.Dictionary { { "item", food }, { "health", Vitals.Health } });
+            return;
+        }
+
         if (CurrentAction.TargetId == "")
         {
             Finish(true, "ok");
@@ -578,6 +826,34 @@ public partial class NPCActor : CharacterBody2D
             }
         }
 
+        // "attack" — the one universal fighting mechanism (Combat.
+        // Resolve), reused whether the target is an Animal or another
+        // NPCActor. Weapon damage comes from whatever's actually in
+        // Inventory (Weapons.BestDamage) — a stick if carried, bare
+        // hands otherwise.
+        if (CurrentAction.Id == "attack")
+        {
+            if (_targetNode is not ICombatant target || !IsInstanceValid(_targetNode))
+            {
+                Finish(false, "target_not_found");
+                return;
+            }
+            if (target.IsDown)
+            {
+                Finish(false, "target_already_down");
+                return;
+            }
+            Combat.Result combatResult = Combat.Resolve(Stats.StrengthMod, Stats.DexterityMod, target.DexterityMod, Weapons.BestDamage(Inventory));
+            var data = combatResult.Check.ToData("attack");
+            if (combatResult.Hit)
+            {
+                target.ReceiveDamage(combatResult.Damage, this);
+                data["damage"] = combatResult.Damage;
+            }
+            Finish(combatResult.Hit, combatResult.Hit ? "hit" : "missed", data);
+            return;
+        }
+
         // The target owns its own rules about whether the attempt
         // actually works right now (depleted? wrong action? hands
         // already full?) — the actor only needs to ask and relay the
@@ -608,6 +884,7 @@ public partial class NPCActor : CharacterBody2D
         _targetNode = null;
         _waypoints = null;
         _waypointIndex = 0;
+        _fleeDestination = null;
         _state = State.Idle;
         EmitSignal(SignalName.ActionCompleted, result);
     }

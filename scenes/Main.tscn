@@ -81,6 +81,18 @@ text = "Trade"
 visible = false
 text = "Steal"
 
+[node name="AttackButton" type="Button" parent="UI/ActionPanel"]
+visible = false
+text = "Attack"
+
+[node name="EatButton" type="Button" parent="UI/ActionPanel"]
+visible = false
+text = "Eat"
+
+[node name="PickUpStickButton" type="Button" parent="UI/ActionPanel"]
+visible = false
+text = "Pick Up Stick"
+
 [node name="SleepButton" type="Button" parent="UI/ActionPanel"]
 visible = false
 text = "Sleep"

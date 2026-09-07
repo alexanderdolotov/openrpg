@@ -23,6 +23,12 @@ public class MindConfig
     // network hiccup); on for testing "does the LLM alone hold up."
     [JsonPropertyName("pure_llm_mode")] public bool PureLlmMode { get; set; } = false;
 
+    // See GameSettings.PermadeathEnabled for what this actually
+    // switches — a config-level toggle since it's a "which kind of game
+    // is this session" decision, same tier as provider/model, not
+    // something that lives on any one character.
+    [JsonPropertyName("permadeath_enabled")] public bool PermadeathEnabled { get; set; } = false;
+
     private const string ConfigPath = "mind.local.json";
 
     public static MindConfig Load()

@@ -21,6 +21,11 @@ public class Vitals
 
     public bool NeedsSleep => Fatigue < LowFatigueThreshold;
 
+    // True the instant a real hit (Damage()) brings Health to 0 — what
+    // NPCActor's own State.Incapacitated (or, under
+    // GameSettings.PermadeathEnabled, real death) actually keys off.
+    public bool IsIncapacitated => Health <= 0f;
+
     public void DecayOverTime(float seconds)
     {
         Fatigue = Mathf.Max(0f, Fatigue - PassiveDecayPerSecond * seconds);
@@ -34,14 +39,27 @@ public class Vitals
         Fatigue = Mathf.Max(0f, Fatigue - amount);
     }
 
-    // Sleep restores fatigue fully and nudges health back up a little —
-    // there's no injury system yet to make Health mean much beyond
-    // that, but the field and the recovery hook both already exist for
-    // whatever adds one.
+    // Sleep restores fatigue fully and nudges health back up a little.
     public void Sleep()
     {
         Fatigue = 100f;
         Health = Mathf.Min(100f, Health + 10f);
+    }
+
+    // A real hit — from Combat.Resolve() — actually costs Health, down
+    // to (not below) 0.
+    public void Damage(float amount)
+    {
+        Health = Mathf.Max(0f, Health - amount);
+    }
+
+    // Waking up from being knocked out (State.Incapacitated, only when
+    // GameSettings.PermadeathEnabled is off) — a partial recovery, not
+    // a full heal; getting knocked out again right away is meant to
+    // stay a real risk, not reset to full every time.
+    public void RecoverFromKnockout()
+    {
+        Health = 40f;
     }
 
     public string Describe()

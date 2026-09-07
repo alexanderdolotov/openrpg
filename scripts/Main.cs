@@ -44,6 +44,15 @@ public partial class Main : Node2D
     private readonly List<FishingSpot> _riverFishingSpots = new();
     private River _river;
 
+    private readonly List<Stick> _sticks = new();
+
+    // Every living wild animal — the SAME list WorldContext.Animals
+    // hands out (see BuildWorld's own comment on _agents for why this
+    // reference-sharing pattern already exists). Main is the only thing
+    // that ever adds/removes from it (spawning, Animal.Died) — a
+    // species' own DecideBehavior() only ever reads it.
+    private readonly List<Animal> _animals = new();
+
     private readonly Dictionary<string, Node2D> _flagpoles = new(); // distant, non-resource landmarks — see MistyMountains
     // Everything that can obstruct movement (via IObstacle, feeding
     // BuildPathGrid()) gets registered here. Also still the complete
@@ -151,13 +160,14 @@ public partial class Main : Node2D
         pauseButton.Pressed += TogglePause;
 
         MindConfig config = MindConfig.Load();
+        GameSettings.PermadeathEnabled = config.PermadeathEnabled;
         _thoughtLog = new NpcThoughtLogger(config.LogNpcThoughts);
         Log($"backend: {config.Provider} ({config.Model})" +
             (config.PureLlmMode ? " [pure LLM mode]" : "") +
             (config.LogNpcThoughts ? $" [logging to {_thoughtLog.LogPath}]" : ""), "6f8068");
         _thoughtLog.Log("*", "RUN_START", $"backend={config.Provider} model={config.Model} pure_llm_mode={config.PureLlmMode}");
 
-        _world = new WorldContext { Trees = _trees, FishingSpots = _fishingSpots, PineTrees = _pineTrees, BerryBushes = _berryBushes, Home = _home, Flagpoles = _flagpoles, Agents = _agents };
+        _world = new WorldContext { Trees = _trees, FishingSpots = _fishingSpots, PineTrees = _pineTrees, BerryBushes = _berryBushes, Sticks = _sticks, Home = _home, Flagpoles = _flagpoles, Agents = _agents, Animals = _animals };
         WorldContext world = _world;
 
         List<NpcDefinition> roster = NpcRoster.Load();
@@ -183,6 +193,7 @@ public partial class Main : Node2D
                 worldContext: world,
                 spriteVariant: i % CharacterSpriteBuilder.VariantCount);
             _agents.Add(agent);
+            agent.Actor.Downed += () => OnCharacterDowned(agent.Actor, agent.Personality.Name);
 
             LogSpawn(def, personality, agent.Actor.Stats);
             agent.Start();
@@ -190,7 +201,39 @@ public partial class Main : Node2D
 
         PlayerCharacter player = CreatePlayer(world);
         AttachFollowCamera(player);
+        player.Downed += () => OnCharacterDowned(player, player.DisplayName);
+
+        SpawnInitialAnimals();
+        BuildAnimalPopulationTimer();
     }
+
+    // Only ever fires under GameSettings.PermadeathEnabled — see
+    // NPCActor.ReceiveDamage(). Unregisters the character so nothing
+    // else can target them anymore (follow/trade/steal, or a fresh
+    // "nearest human" query from an Animal), but deliberately leaves
+    // the body itself in the world, still visible (NPCActor's own
+    // permanent 💀-and-lying-down visual) rather than freeing the node
+    // — losing an NPC this way is meant to be a real, visible story
+    // event, not a silent disappearance.
+    private void OnCharacterDowned(NPCActor actor, string displayName)
+    {
+        _agents.RemoveAll(a => a.DisplayName == displayName);
+        World().Unregister(displayName);
+        Log($"[world] {displayName} has fallen.", "e0876b");
+        _thoughtLog?.Log(displayName, "DOWNED", $"{displayName} has fallen (permadeath).");
+
+        if (actor is PlayerCharacter)
+        {
+            GetTree().Paused = true;
+            var pauseButton = GetNode<Button>("UI/PauseButton");
+            pauseButton.Text = "Restart";
+            pauseButton.Pressed -= TogglePause;
+            pauseButton.Pressed += RestartGame;
+            Log("[world] You have died. Click Restart (or the Pause button) to play again.", "e0876b");
+        }
+    }
+
+    private void RestartGame() => GetTree().ReloadCurrentScene();
 
     // Built the same way an NPC is (registered in WorldRegistry, added
     // to the shared Agents list, a fresh NPCActor underneath with its
@@ -425,6 +468,31 @@ public partial class Main : Node2D
             _decor.Add(foliage);
         }
 
+        // Sticks — "for now, place sticks that can be picked up as a
+        // basic weapon." Flat ground clutter, same "always behind"
+        // treatment as FishingSpot (added to Main directly, not
+        // _worldLayer — nothing about lying on the ground has real
+        // visual height a character walks in front of or behind).
+        Vector2[] stickPositions = { new(450, 500), new(750, 150), new(200, 600) };
+        foreach (Vector2 pos in stickPositions)
+        {
+            var stick = new Stick { Name = $"Stick{_sticks.Count}", Position = pos };
+            string stickId = $"stick_{_sticks.Count}";
+            AddChild(stick);
+            World().Register(stickId, stick);
+            stick.WorldId = stickId;
+            _sticks.Add(stick);
+            // Picked up (or otherwise freed) -> no longer a valid
+            // target; NpcAgent's cached StickIds() needs to know its
+            // list is stale, same ContentVersion mechanism new trees
+            // already bump.
+            stick.TreeExiting += () =>
+            {
+                _sticks.Remove(stick);
+                _world.ContentVersion++;
+            };
+        }
+
         // Everything hand-placed above counts as "already known" —
         // without this, the instant anyone takes a single step,
         // WorldExploration would read their own starting region as
@@ -468,6 +536,94 @@ public partial class Main : Node2D
             spot.Refill(3);
         }
         Log("[world] the fish have moved on — new spots have turned up along the river.", "9fc98a");
+    }
+
+    // "If the population of bears and wolves drops below threshold,
+    // game should auto spawn them. Same with rabbits." One shared
+    // floor/ceiling per species — the floor is what this timer
+    // enforces; the ceiling also caps Rabbit's own natural multiplying
+    // (see TryMultiplyRabbit) so "no overpopulation" holds regardless
+    // of which path (timer top-up or multiplying) would otherwise push
+    // a count over it.
+    private const int MinRabbits = 4, MaxRabbits = 12;
+    private const int MinWolves = 2, MaxWolves = 5;
+    private const int MinBears = 1, MaxBears = 3;
+
+    private void SpawnInitialAnimals()
+    {
+        for (int i = 0; i < MinRabbits; i++) SpawnAnimal<Rabbit>(RandomAnimalSpawnPosition());
+        for (int i = 0; i < MinWolves; i++) SpawnAnimal<Wolf>(RandomAnimalSpawnPosition());
+        for (int i = 0; i < MinBears; i++) SpawnAnimal<Bear>(RandomAnimalSpawnPosition());
+    }
+
+    private void BuildAnimalPopulationTimer()
+    {
+        var timer = new Timer { WaitTime = 30.0, Autostart = true };
+        _worldLayer.AddChild(timer);
+        timer.Timeout += () =>
+        {
+            EnsureMinPopulation<Rabbit>(MinRabbits);
+            EnsureMinPopulation<Wolf>(MinWolves);
+            EnsureMinPopulation<Bear>(MinBears);
+        };
+    }
+
+    private void EnsureMinPopulation<T>(int min) where T : Animal, new()
+    {
+        int count = 0;
+        foreach (Animal a in _animals) if (a is T) count++;
+        for (; count < min; count++)
+            SpawnAnimal<T>(RandomAnimalSpawnPosition());
+    }
+
+    // Rabbit's own "eat, and multiply within reason" — separate from
+    // EnsureMinPopulation above (that's the floor; this is what
+    // actually grows the population day to day), but respects the
+    // exact same MaxRabbits ceiling, so "no overpopulation" holds no
+    // matter which path added the last one.
+    private void TryMultiplyRabbit(Rabbit parent)
+    {
+        int count = 0;
+        foreach (Animal a in _animals) if (a is Rabbit) count++;
+        if (count >= MaxRabbits) return;
+        Vector2 pos = parent.GlobalPosition + new Vector2(Dice.FloatRange(-40f, 40f), Dice.FloatRange(-40f, 40f));
+        SpawnAnimal<Rabbit>(pos);
+    }
+
+    private Vector2 RandomAnimalSpawnPosition()
+    {
+        float x = StartingVillageArea.Position.X + Dice.FloatRange(0f, StartingVillageArea.Size.X);
+        float y = StartingVillageArea.Position.Y + Dice.FloatRange(0f, StartingVillageArea.Size.Y);
+        return new Vector2(x, y);
+    }
+
+    // Monotonically increasing, never reused — unlike trees/bushes
+    // (which only ever grow, so list position is a stable id), animals
+    // die and get removed from the middle of _animals all the time, so
+    // "index into the list" can't be the id scheme here.
+    private int _nextAnimalId = 0;
+
+    private T SpawnAnimal<T>(Vector2 pos) where T : Animal, new()
+    {
+        var animal = new T();
+        string id = $"animal_{_nextAnimalId++}";
+        _worldLayer.AddChild(animal); // Y-sorted, same as any other object with real visual height
+        animal.Initialize(_world, pos);
+        _animals.Add(animal);
+        _world.Animals.Add(animal);
+        World().Register(id, animal);
+        animal.WorldId = id;
+        _world.ContentVersion++; // AnimalIds() is cached off this, same as trees/bushes
+        animal.Died += () =>
+        {
+            _animals.Remove(animal);
+            _world.Animals.Remove(animal);
+            World().Unregister(id);
+            _world.ContentVersion++;
+        };
+        if (animal is Rabbit rabbit)
+            rabbit.WantsToMultiply += () => TryMultiplyRabbit(rabbit);
+        return animal;
     }
 
     // The actual footprint of everything hand-placed in BuildWorld()

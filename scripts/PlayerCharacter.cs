@@ -52,6 +52,9 @@ public partial class PlayerCharacter : NPCActor, IWorldCharacter
     private Button _followButton;
     private Button _tradeButton;
     private Button _stealButton;
+    private Button _attackButton;
+    private Button _eatButton;
+    private Button _pickUpStickButton;
     private Button _sleepButton;
     private Button[] _allButtons; // fixed panel order — also what number-key 1-9 indexes into, see _quickActions below
     private Label _activeActionLabel;
@@ -75,7 +78,10 @@ public partial class PlayerCharacter : NPCActor, IWorldCharacter
     private GameAction _followTarget;
     private GameAction _tradeTarget;
     private GameAction _stealTarget;
+    private GameAction _attackTarget;
+    private GameAction _pickUpStickTarget;
     private static readonly GameAction SleepAction = new("sleep", "", 0f);
+    private static readonly GameAction EatAction = new("eat", "", 0f);
 
     // Same InventoryWatcher NpcAgent uses — no Memory to record into
     // here, so NoticeInventoryChanges() below just logs each note
@@ -117,8 +123,11 @@ public partial class PlayerCharacter : NPCActor, IWorldCharacter
         _followButton = actionPanel.GetNode<Button>("FollowButton");
         _tradeButton = actionPanel.GetNode<Button>("TradeButton");
         _stealButton = actionPanel.GetNode<Button>("StealButton");
+        _attackButton = actionPanel.GetNode<Button>("AttackButton");
+        _eatButton = actionPanel.GetNode<Button>("EatButton");
+        _pickUpStickButton = actionPanel.GetNode<Button>("PickUpStickButton");
         _sleepButton = actionPanel.GetNode<Button>("SleepButton");
-        _allButtons = new[] { _pickAppleButton, _catchFishButton, _gatherPineconeButton, _gatherBerryButton, _depositButton, _travelButton, _followButton, _tradeButton, _stealButton, _sleepButton };
+        _allButtons = new[] { _pickAppleButton, _catchFishButton, _gatherPineconeButton, _gatherBerryButton, _depositButton, _travelButton, _followButton, _tradeButton, _stealButton, _attackButton, _eatButton, _pickUpStickButton, _sleepButton };
 
         _pickAppleButton.Pressed += () => TryAssign(_pickAppleButton, _pickAppleTarget);
         _catchFishButton.Pressed += () => TryAssign(_catchFishButton, _catchFishTarget);
@@ -129,6 +138,9 @@ public partial class PlayerCharacter : NPCActor, IWorldCharacter
         _followButton.Pressed += () => TryAssign(_followButton, _followTarget);
         _tradeButton.Pressed += () => TryAssign(_tradeButton, _tradeTarget);
         _stealButton.Pressed += () => TryAssign(_stealButton, _stealTarget);
+        _attackButton.Pressed += () => TryAssign(_attackButton, _attackTarget);
+        _eatButton.Pressed += () => TryAssign(_eatButton, EatAction);
+        _pickUpStickButton.Pressed += () => TryAssign(_pickUpStickButton, _pickUpStickTarget);
         _sleepButton.Pressed += () => TryAssign(_sleepButton, SleepAction);
 
         ActionCompleted += OnMyActionCompleted;
@@ -402,6 +414,19 @@ public partial class PlayerCharacter : NPCActor, IWorldCharacter
         if (_stealTarget != null) _stealButton.Text = $"Steal from {stealTarget.DisplayName}";
         _stealButton.Visible = _stealTarget != null;
 
+        Animal attackTarget = NearestAnimal(ActionRanges.Attack);
+        _attackTarget = attackTarget != null ? new GameAction("attack", attackTarget.WorldId, ActionRanges.Attack) : null;
+        if (attackTarget != null) _attackButton.Text = $"Attack {SpeciesName(attackTarget)}";
+        _attackButton.Visible = _attackTarget != null;
+
+        // Same NPCActor.CanEat() rule NPCs' tool schema is gated on —
+        // Health actually below the threshold, and real food on hand.
+        _eatButton.Visible = CanEat();
+
+        Stick nearestStick = NearestStick(ActionRanges.PickUpStick);
+        _pickUpStickTarget = nearestStick != null ? new GameAction("pick_up_stick", nearestStick.WorldId, ActionRanges.PickUpStick) : null;
+        _pickUpStickButton.Visible = _pickUpStickTarget != null;
+
         // Same CanSleep() rule NPCs' tool schema is gated on — never
         // above SleepUnnecessaryThreshold, always below
         // LowFatigueThreshold, otherwise only near home. Was
@@ -426,6 +451,9 @@ public partial class PlayerCharacter : NPCActor, IWorldCharacter
             (_followButton, _followTarget),
             (_tradeButton, _tradeTarget),
             (_stealButton, _stealTarget),
+            (_attackButton, _attackTarget),
+            (_eatButton, _eatButton.Visible ? EatAction : null),
+            (_pickUpStickButton, _pickUpStickTarget),
             (_sleepButton, _sleepButton.Visible ? SleepAction : null),
         };
         foreach ((Button button, GameAction action) in candidates)
@@ -517,6 +545,41 @@ public partial class PlayerCharacter : NPCActor, IWorldCharacter
         return best < 0 ? null : new GameAction(actionId, idFor(best), actionRange);
     }
 
+    // NOT NearestInRange — that reconstructs "{prefix}_{list index}",
+    // which breaks for anything that can be removed from the middle of
+    // its list (an animal dying, a stick being picked up) the same way
+    // it would for NpcAgent's own cached id lists; both read the
+    // already-assigned WorldId instead.
+    private Animal NearestAnimal(float range)
+    {
+        Animal best = null;
+        float bestDist = float.MaxValue;
+        foreach (Animal a in _world.Animals)
+        {
+            if (a.IsDown) continue;
+            float d = GlobalPosition.DistanceTo(a.GlobalPosition);
+            if (d <= range && d < bestDist) { bestDist = d; best = a; }
+        }
+        return best;
+    }
+
+    private Stick NearestStick(float range)
+    {
+        Stick best = null;
+        float bestDist = float.MaxValue;
+        foreach (Stick s in _world.Sticks)
+        {
+            float d = GlobalPosition.DistanceTo(s.GlobalPosition);
+            if (d <= range && d < bestDist) { bestDist = d; best = s; }
+        }
+        return best;
+    }
+
+    private static string SpeciesName(Animal a) => a switch
+    {
+        Wolf => "Wolf", Bear => "Bear", Rabbit => "Rabbit", _ => "Animal",
+    };
+
     // Feeds WorldEventLog so nearby NPCs can notice the PLAYER'S own
     // non-secret actions on their own next turn — same shape as
     // NpcAgent's own AnnounceVisibleAction(), just no Memory/thought-log
@@ -536,6 +599,9 @@ public partial class PlayerCharacter : NPCActor, IWorldCharacter
             "deposit" => $"{DisplayName} deposits their haul at home.",
             "travel" => $"{DisplayName} arrives at {targetId}.",
             "follow" => $"{DisplayName} walks up alongside {targetId}.",
+            "attack" => $"{DisplayName} strikes {targetId}!",
+            "eat" => $"{DisplayName} eats something to recover.",
+            "pick_up_stick" => $"{DisplayName} picks up a stick.",
             "sleep" => $"{DisplayName} was asleep nearby for a while.",
             _ => null,
         };

@@ -23,7 +23,15 @@ public class GameAction
     public readonly string Item;
     public readonly int Amount;
 
-    public GameAction(string id, string targetId = "", float range = 32f, Emotion? emotion = null, string message = "", string item = "", int amount = 1)
+    // Only set for "flee" — a computed point to run toward, not a
+    // WorldRegistry entity id (there's nothing to register: it's just
+    // "away from whatever's attacking me," picked fresh each time). A
+    // plain Godot.Vector2? struct field doesn't make this a Godot type
+    // or put it on a signal boundary — it's still passed directly
+    // between C# scripts, same as everything else here.
+    public readonly Godot.Vector2? Destination;
+
+    public GameAction(string id, string targetId = "", float range = 32f, Emotion? emotion = null, string message = "", string item = "", int amount = 1, Godot.Vector2? destination = null)
     {
         Id = id;
         TargetId = targetId;
@@ -32,5 +40,6 @@ public class GameAction
         Message = message;
         Item = item;
         Amount = amount;
+        Destination = destination;
     }
 }

@@ -83,4 +83,17 @@ public partial class GatherableFoliage : StaticBody2D, IInteractable, IHasVisual
         data[$"{ItemName}s_left"] = Count;
         return new InteractResult(true, "ok", data);
     }
+
+    // A wild animal eating directly — no roll, no Inventory, no
+    // IInteractable dance (that whole contract is built around a human
+    // actor). Just "is there anything left," and if so, one unit gone.
+    // Bear's own DecideBehavior() is the only caller today.
+    public bool AnimalEat()
+    {
+        if (Count <= 0) return false;
+        Count--;
+        if (Count <= 0)
+            _sprite.Modulate = Tint * DepletedMultiplier;
+        return true;
+    }
 }

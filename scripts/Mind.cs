@@ -41,17 +41,30 @@ public class Mind
     private const string ThinkInstruction =
         "Given the situation below, write ONE short, plain sentence (under 15 words) of what you're actually thinking right now. Talk like a real person thinking to themselves, not a novelist — no metaphors, no describing the scenery, no flowery language. If your last action failed, especially more than once, say so plainly and react to it. Just the plain thought, nothing else.";
     private const string ActInstruction =
-        "Call exactly one of the provided tools that matches the plan below. If you were already in the middle of something — following someone, traveling somewhere, working toward a goal you'd set for yourself — lean toward sticking with it for a while rather than switching every single turn just because you technically can; a goal worth having is worth a bit of follow-through. Only actually change course when it's genuinely finished, clearly not working out, or something that actually matters more just happened — a real reason, not a passing whim. (Nothing here checks for it yet, but the same logic would apply to something urgent and important suddenly appearing, like a dangerous animal — react to what's actually in front of you, not to novelty for its own sake.) If your last action failed — especially if it failed more than once in a row for the same reason — do not just repeat it; pick something that actually addresses why it failed (e.g. deposit before trying to pick or catch again, or choose a different target if one is depleted). travel is a valid choice on its own, out of curiosity, even toward somewhere you've never been and don't know the way to — you don't need a resource-gathering reason to go look at something. speak lets you say something out loud in your own words — anyone within hearing range right now may hear it and decide how to react on their own later, including being persuaded, won over, or talked into something if what you say actually lands with them; it does not control or compel anyone, and if nobody's around, nobody hears it, which is a perfectly normal outcome of speaking. follow lets you walk alongside someone nearby by name — a genuine choice you make (or don't) based on your own read of them and what's been said, not something anyone can force; re-decide it fresh every turn just like anything else, which means choosing follow AGAIN, turn after turn, is what actually keeps you with them — arriving next to them once doesn't mean you're done, they may well walk on right after, and only choosing something else is what actually stops you following. trade gives someone nearby an item you're actually carrying — a real choice about generosity or self-interest, entirely up to you. steal takes an item from someone nearby without asking and without them agreeing to it — you don't know for certain what they're carrying, only a guess, it takes real nerve and a little luck (you can simply fail even if they do have it), and it's not hidden from them forever, since anyone keeps their own count of what they're carrying and can notice later that something's missing. sleep rests where you are and fully restores your fatigue, but takes a while — worth doing once you're actually tired, not as a routine choice, and pay attention to your own fatigue level below: if you're exhausted, that's a real, physical reason to sleep before doing anything else, or to turn down something demanding (a long trip, more gathering) rather than push through it — nobody is forcing that consideration on you, it's just true of your own body right now. Set emotion to how you're genuinely feeling, reacting to what just happened as much as your personality — frustration or disappointment after a repeated failure, satisfaction after a success, not a fixed mood. Only ever target an id that is explicitly listed in the situation — never invent one that isn't there. Choose whichever tool actually fits who you are and what you want right now — nothing assigns you a role.";
+        "Call exactly one of the provided tools that matches the plan below. If you were already in the middle of something — following someone, traveling somewhere, working toward a goal you'd set for yourself — lean toward sticking with it for a while rather than switching every single turn just because you technically can; a goal worth having is worth a bit of follow-through. Only actually change course when it's genuinely finished, clearly not working out, or something that actually matters more just happened — a real reason, not a passing whim. (This call is never even reached while something dangerous — a wolf or bear actively coming for you — is happening; see DecideThreatResponse below for that entirely separate, narrower decision.) If your last action failed — especially if it failed more than once in a row for the same reason — do not just repeat it; pick something that actually addresses why it failed (e.g. deposit before trying to pick or catch again, or choose a different target if one is depleted). travel is a valid choice on its own, out of curiosity, even toward somewhere you've never been and don't know the way to — you don't need a resource-gathering reason to go look at something. speak lets you say something out loud in your own words — anyone within hearing range right now may hear it and decide how to react on their own later, including being persuaded, won over, or talked into something if what you say actually lands with them; it does not control or compel anyone, and if nobody's around, nobody hears it, which is a perfectly normal outcome of speaking. follow lets you walk alongside someone nearby by name — a genuine choice you make (or don't) based on your own read of them and what's been said, not something anyone can force; re-decide it fresh every turn just like anything else, which means choosing follow AGAIN, turn after turn, is what actually keeps you with them — arriving next to them once doesn't mean you're done, they may well walk on right after, and only choosing something else is what actually stops you following. trade gives someone nearby an item you're actually carrying — a real choice about generosity or self-interest, entirely up to you. steal takes an item from someone nearby without asking and without them agreeing to it — you don't know for certain what they're carrying, only a guess, it takes real nerve and a little luck (you can simply fail even if they do have it), and it's not hidden from them forever, since anyone keeps their own count of what they're carrying and can notice later that something's missing. sleep rests where you are and fully restores your fatigue, but takes a while — worth doing once you're actually tired, not as a routine choice, and pay attention to your own fatigue level below: if you're exhausted, that's a real, physical reason to sleep before doing anything else, or to turn down something demanding (a long trip, more gathering) rather than push through it — nobody is forcing that consideration on you, it's just true of your own body right now. Set emotion to how you're genuinely feeling, reacting to what just happened as much as your personality — frustration or disappointment after a repeated failure, satisfaction after a success, not a fixed mood. Only ever target an id that is explicitly listed in the situation — never invent one that isn't there. Choose whichever tool actually fits who you are and what you want right now — nothing assigns you a role.";
+    // A completely separate, deliberately narrow instruction from
+    // ActInstruction above — "the LLM can't choose to go pick berries
+    // while a wolf is attacking them." Only ever used by
+    // DecideThreatResponse(), which offers exactly three tools (fight/
+    // flee/freeze), nothing else, and skips the usual think-then-act
+    // two-call split entirely — a "how am I feeling about my life
+    // right now" sentence isn't worth the extra round trip when
+    // something is actively trying to hurt this character and
+    // NpcAgent's own instant reflex is already acting in the
+    // meantime.
+    private const string ThreatInstruction =
+        "You are in immediate physical danger — a wild animal is actively coming for you or attacking you right now, described in the situation below. Choose exactly one of three responses: fight back, flee (run for it), or freeze (hold still, or cry out for help, rather than acting decisively). There is no fourth option — you cannot gather, travel, or do anything else right now. Weigh your own health and strength honestly: badly hurt, weak, or facing more than one attacker at once are all real reasons to flee or freeze rather than fight. A confident, strong, or cornered character may reasonably choose to fight. Pick whichever genuinely fits your personality and this exact situation.";
+
     private const string SummarizeSystemPrompt =
         "You are compressing an NPC's memory log into a short diary paragraph (3-5 sentences) they'll carry forward. Preserve what matters for future decisions — where they've been, what they've done, anything notable, and anything said aloud (by them or heard from someone else), including who said or asked for what by name. A repeated identical failure is NOT routine detail — it's the opposite: state plainly what failed, why, and how many times, so it isn't attempted again pointlessly. Drop only genuinely routine, non-repeated detail (a single successful wait, a normal walk). Write in first person, past tense.";
 
-    private static readonly string[] ValidActions = { "pick_apple", "catch_fish", "gather_pinecone", "gather_berry", "deposit", "travel", "speak", "follow", "trade", "steal", "sleep", "wait" };
+    private static readonly string[] ValidActions = { "pick_apple", "catch_fish", "gather_pinecone", "gather_berry", "deposit", "travel", "speak", "follow", "trade", "steal", "attack", "eat", "pick_up_stick", "sleep", "wait" };
 
     // Every item type that currently exists in the world — trade/steal
     // both need a fixed, enumerable answer to "which item" for the tool
     // schema. Grows the day a new resource type does, same as
     // ActionRanges already does per-action.
-    private static readonly string[] ItemTypes = { "apple", "fish", "pinecone", "blueberry", "blackberry", "raspberry" };
+    private static readonly string[] ItemTypes = { "apple", "fish", "pinecone", "blueberry", "blackberry", "raspberry", "stick" };
 
     private readonly ILlmProvider _provider;
 
@@ -64,30 +77,29 @@ public class Mind
     // now" list Decide()/BuildTools()/ParseToolCall() all need — this
     // used to be seven-plus positional string[]/bool parameters passed
     // identically through all three, which was already unwieldy before
-    // gather_pinecone/gather_berry needed two more; one struct instead
-    // of growing that list a third time.
-    public readonly struct AvailableTargets
+    // gather_pinecone/gather_berry needed two more. Plain settable
+    // fields + object-initializer construction (same convention as
+    // WorldContext), not a positional constructor — that stopped
+    // scaling once attack/eat/pick_up_stick needed three more fields
+    // apiece on top of the original eight.
+    public class AvailableTargets
     {
-        public readonly string[] TreeIds;
-        public readonly string[] FishingSpotIds;
-        public readonly string[] PineTreeIds;
-        public readonly string[] BerryBushIds;
-        public readonly string[] TravelTargetIds;
-        public readonly string[] NearbyNpcNames;
-        public readonly string[] CarriedItems;
-        public readonly bool SleepAllowed;
+        public string[] TreeIds;
+        public string[] FishingSpotIds;
+        public string[] PineTreeIds;
+        public string[] BerryBushIds;
+        public string[] TravelTargetIds;
+        public string[] NearbyNpcNames;
+        public string[] CarriedItems;
+        public bool SleepAllowed;
 
-        public AvailableTargets(string[] treeIds, string[] fishingSpotIds, string[] pineTreeIds, string[] berryBushIds, string[] travelTargetIds, string[] nearbyNpcNames, string[] carriedItems, bool sleepAllowed)
-        {
-            TreeIds = treeIds;
-            FishingSpotIds = fishingSpotIds;
-            PineTreeIds = pineTreeIds;
-            BerryBushIds = berryBushIds;
-            TravelTargetIds = travelTargetIds;
-            NearbyNpcNames = nearbyNpcNames;
-            CarriedItems = carriedItems;
-            SleepAllowed = sleepAllowed;
-        }
+        // Nearby, attackable animals — "attack"'s own target-id enum.
+        public string[] AnimalIds;
+        // Sticks on the ground nearby — "pick_up_stick"'s target-id enum.
+        public string[] StickIds;
+        // NPCActor.CanEat() — same "offered only when it's a real
+        // option" treatment SleepAllowed already gets.
+        public bool EatAllowed;
     }
 
     public readonly struct MindResult
@@ -154,6 +166,104 @@ public class Mind
         }
 
         return MindResult.Fail(parsed.Error, thought);
+    }
+
+    public readonly struct ThreatResult
+    {
+        public readonly bool Ok;
+        public readonly string Error;
+        public readonly string Choice; // "fight" | "flee" | "freeze" — only meaningful when Ok
+
+        private ThreatResult(bool ok, string error, string choice)
+        {
+            Ok = ok;
+            Error = error;
+            Choice = choice;
+        }
+
+        public static ThreatResult Fail(string error) => new(false, error, null);
+        public static ThreatResult Success(string choice) => new(true, null, choice);
+    }
+
+    // The fight/flee/freeze decision — genuinely serviced to the LLM
+    // first, per "try to service these options to LLM first," before
+    // NpcAgent ever falls back to a random, stat-weighted choice of
+    // its own. Deliberately its own method rather than a special case
+    // of Decide()/BuildTools() above: the tool list here is fixed at
+    // exactly three entries, none of which are "real" GameAction ids
+    // (NpcAgent.MapThreatChoiceToAction turns the choice into an
+    // actual attack/flee/wait afterward) so there's nothing here for
+    // ParseToolCall's normal target-validation trust boundary to do.
+    public async Task<ThreatResult> DecideThreatResponse(string perceptionText, Personality personality)
+    {
+        string persona = personality.DescribeForPrompt();
+        float temperature = personality.Temperature;
+
+        var messages = new object[]
+        {
+            new { role = "system", content = $"{persona}\n\n{ThreatInstruction}" },
+            new { role = "user", content = perceptionText },
+        };
+        object[] tools = BuildThreatTools();
+
+        ChatResult result = await _provider.Chat(messages, tools, temperature);
+        if (!result.Ok)
+            return ThreatResult.Fail($"act_{result.Error}");
+
+        if (result.Message.ToolCalls is not { Length: > 0 })
+            return ThreatResult.Fail("no_tool_call");
+
+        FunctionCall fn = result.Message.ToolCalls[0]?.Function;
+        if (fn == null || string.IsNullOrEmpty(fn.Name))
+            return ThreatResult.Fail("malformed_tool_call");
+
+        string choice = fn.Name;
+        return choice is "fight" or "flee" or "freeze"
+            ? ThreatResult.Success(choice)
+            : ThreatResult.Fail($"unknown_choice_{choice}");
+    }
+
+    private static object[] BuildThreatTools()
+    {
+        // No target_id/item/anything on any of these — WHICH animal to
+        // fight or which direction to flee is a mechanical decision
+        // NpcAgent makes itself (nearest threat; straight away from
+        // it), not something offered to the model. That keeps this
+        // schema genuinely limited to the three verbs the user asked
+        // for, not three-verbs-times-however-many-targets.
+        return new object[]
+        {
+            new
+            {
+                type = "function",
+                function = new
+                {
+                    name = "fight",
+                    description = "Turn and fight back against whatever is attacking you.",
+                    parameters = new { type = "object", properties = new { } },
+                },
+            },
+            new
+            {
+                type = "function",
+                function = new
+                {
+                    name = "flee",
+                    description = "Run away from the danger as fast as you can, right now.",
+                    parameters = new { type = "object", properties = new { } },
+                },
+            },
+            new
+            {
+                type = "function",
+                function = new
+                {
+                    name = "freeze",
+                    description = "Freeze in place, or cry out for help, rather than fighting back or running.",
+                    parameters = new { type = "object", properties = new { } },
+                },
+            },
+        };
     }
 
     // Called by NpcMemory once its raw log outgrows MaxLlmChars. Same
@@ -293,6 +403,21 @@ public class Mind
                 int amount = ParseAmount(fn.Arguments);
                 return ParseResult.Success(new GameAction(name, targetId, ActionRanges.Steal, emotion, item: item, amount: amount));
             }
+            case "attack":
+                if (Array.IndexOf(targets.AnimalIds, targetId) < 0)
+                    return ParseResult.Fail($"invalid_target_{targetId}");
+                return ParseResult.Success(new GameAction(name, targetId, ActionRanges.Attack, emotion));
+            case "eat":
+                // The tool schema already omits "eat" when !EatAllowed
+                // (see BuildTools) — same "schema is a hint, this is
+                // the real trust boundary" posture as sleep below.
+                if (!targets.EatAllowed)
+                    return ParseResult.Fail("eat_not_available");
+                return ParseResult.Success(new GameAction(name, "", 0f, emotion));
+            case "pick_up_stick":
+                if (Array.IndexOf(targets.StickIds, targetId) < 0)
+                    return ParseResult.Fail($"invalid_target_{targetId}");
+                return ParseResult.Success(new GameAction(name, targetId, ActionRanges.PickUpStick, emotion));
             case "sleep":
                 // The tool schema already omits "sleep" entirely when
                 // !sleepAllowed (see BuildTools), so this only ever
@@ -622,6 +747,83 @@ public class Mind
                             emotion = new { type = "string", @enum = EmotionExtensions.AllValues, description = "how you're feeling right now" },
                         },
                         required = new[] { "target_id", "item", "emotion" },
+                    },
+                },
+            });
+        }
+
+        // Only offered when there's actually something nearby worth
+        // fighting — a wild animal within range. attack against
+        // another person isn't offered at all right now (nothing here
+        // decides that's ever a real option) — this is strictly the
+        // "an animal is a threat, or worth taking on" case.
+        if (targets.AnimalIds.Length > 0)
+        {
+            tools.Add(new
+            {
+                type = "function",
+                function = new
+                {
+                    name = "attack",
+                    description = "Fight a nearby wild animal — walk up and strike it, with whatever weapon (or bare hands) you're carrying. Can miss, and it can hit back.",
+                    parameters = new
+                    {
+                        type = "object",
+                        properties = new
+                        {
+                            target_id = new { type = "string", @enum = targets.AnimalIds, description = "which animal to attack" },
+                            emotion = new { type = "string", @enum = EmotionExtensions.AllValues, description = "how you're feeling right now" },
+                        },
+                        required = new[] { "target_id", "emotion" },
+                    },
+                },
+            });
+        }
+
+        // Only offered once NPCActor.CanEat() says it's a real option —
+        // Health actually below the threshold, and real food on hand.
+        if (targets.EatAllowed)
+        {
+            tools.Add(new
+            {
+                type = "function",
+                function = new
+                {
+                    name = "eat",
+                    description = "Eat something from what you're carrying to restore some Health. Uses whichever food you have.",
+                    parameters = new
+                    {
+                        type = "object",
+                        properties = new
+                        {
+                            emotion = new { type = "string", @enum = EmotionExtensions.AllValues, description = "how you're feeling right now" },
+                        },
+                        required = new[] { "emotion" },
+                    },
+                },
+            });
+        }
+
+        // Only offered when there's actually a stick on the ground
+        // nearby.
+        if (targets.StickIds.Length > 0)
+        {
+            tools.Add(new
+            {
+                type = "function",
+                function = new
+                {
+                    name = "pick_up_stick",
+                    description = "Pick up a stick lying on the ground — a basic weapon, better than bare hands in a fight.",
+                    parameters = new
+                    {
+                        type = "object",
+                        properties = new
+                        {
+                            target_id = new { type = "string", @enum = targets.StickIds, description = "which stick to pick up" },
+                            emotion = new { type = "string", @enum = EmotionExtensions.AllValues, description = "how you're feeling right now" },
+                        },
+                        required = new[] { "target_id", "emotion" },
                     },
                 },
             });
