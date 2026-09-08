@@ -147,7 +147,11 @@ public partial class Rabbit : Animal
         if (check.Success)
         {
             _noticedThreat = true;
-            LogEvent($"notices {DescribeTarget(wolf)} closing in! [{check.Describe()}]", "e0c66a");
+            // Level 2 only — same "always animal-vs-animal, never a
+            // real threat to a human" reasoning as SetFleeing's own
+            // gate; see GameSettings.LogLevel.
+            if (GameSettings.LogLevel >= 2)
+                LogEvent($"notices {DescribeTarget(wolf)} closing in! [{check.Describe()}]", "e0c66a");
         }
         return _noticedThreat;
     }

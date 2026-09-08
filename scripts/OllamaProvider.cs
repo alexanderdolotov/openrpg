@@ -14,6 +14,12 @@ public partial class OllamaProvider : Node, ILlmProvider
     public string BaseUrl = "http://analytics.local:11434";
     public string Model = "llama3.2:3b";
     public float TimeoutSeconds = 60f; // first call pays a cold model-load cost on a fresh host
+    // See MindConfig.NumCtx's own comment — without this, Ollama loads
+    // the model at whatever ITS OWN default context window is (confirmed
+    // 4096 on analytics.local, nothing to do with what the model can
+    // actually handle), and silently truncates the front of any prompt
+    // that exceeds it rather than erroring.
+    public int NumCtx = 8192;
 
     private HttpRequest _request;
 
@@ -30,7 +36,7 @@ public partial class OllamaProvider : Node, ILlmProvider
             ["model"] = Model,
             ["stream"] = false,
             ["keep_alive"] = "30m",
-            ["options"] = new { temperature },
+            ["options"] = new { temperature, num_ctx = NumCtx },
             ["messages"] = messages,
         };
         if (tools is { Length: > 0 })

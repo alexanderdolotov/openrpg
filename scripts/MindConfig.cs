@@ -38,6 +38,31 @@ public class MindConfig
     // something that lives on any one character.
     [JsonPropertyName("permadeath_enabled")] public bool PermadeathEnabled { get; set; } = false;
 
+    // See GameSettings.LogLevel for what this actually gates.
+    [JsonPropertyName("log_level")] public int LogLevel { get; set; } = 1;
+
+    // Confirmed directly against analytics.local (2026-09-08): Ollama
+    // loads a model with whatever context window IT defaults to, not
+    // whatever the model is actually trained for (llama3.2:3b supports
+    // 131072 per its own model_info, but was running loaded at 4096 —
+    // checked live via /api/ps — since nothing here or in the Modelfile
+    // ever asked for more). Once a real prompt (persona + instructions +
+    // situation + full tool schema, plus a long session's accumulated
+    // memory diary) exceeds whatever's loaded, Ollama does NOT error —
+    // it silently drops the front of the context to fit (confirmed via
+    // prompt_eval_count pinned exactly at the loaded size regardless of
+    // how much longer the actual prompt was), and the model's response
+    // degrades to unstructured rambling with no tool call at all in that
+    // state — a real, reproduced cause of the exact "talks about it
+    // instead of doing it" failure this session spent hours chasing as a
+    // pure model-capability problem. 8192 is a deliberate, generous-but-
+    // not-extreme choice — comfortably above what even a padded real
+    // prompt needs, while not doubling VRAM use more than necessary on a
+    // modest GPU box. Lower this if the box can't fit it (loading fails
+    // or evicts) — check via `curl http://<host>:11434/api/ps` after a
+    // restart to confirm the loaded context_length actually matches.
+    [JsonPropertyName("num_ctx")] public int NumCtx { get; set; } = 8192;
+
     private const string ConfigPath = "mind.local.json";
 
     public static MindConfig Load()
@@ -82,6 +107,7 @@ public class MindConfig
         {
             BaseUrl = BaseUrl,
             Model = Model,
+            NumCtx = NumCtx,
         };
     }
 }

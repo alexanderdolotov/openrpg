@@ -23,4 +23,16 @@ public static class GameSettings
     // unlike PermadeathEnabled above which is only ever read once at
     // boot.
     public static bool ShowVitalsBars = true;
+
+    // 1 (default): the normal console/thought-log verbosity — NPC
+    // decisions/actions, combat that touches a human, deaths, and
+    // everything Main.Log's own callers already produce. 2: also
+    // includes ambient wildlife noise that's entirely animal-vs-animal
+    // and never involves a human either way — a rabbit fleeing a wolf,
+    // or noticing one closing in (see Animal.SetFleeing/Rabbit.
+    // NoticesWolf) — real, constant background activity in a live
+    // ecosystem that's rarely what anyone watching the console actually
+    // wants to see by default, unlike a wolf going after a human (still
+    // level 1; see SetChaseOrAttack) or an animal actually dying.
+    public static int LogLevel = 1;
 }

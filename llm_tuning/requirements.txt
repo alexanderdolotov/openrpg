@@ -1,0 +1,16 @@
+# Stage 1 (1_generate_scenarios.py) needs nothing beyond the standard
+# library — deliberately, so the seed dataset can be generated/regenerated
+# anywhere without setting up a training environment first.
+#
+# Everything below is for the later stages (fine-tuning + eval), same core
+# stack as https://github.com/alexanderdolotov/llm_financial_news_market_data.
+# Needs an NVIDIA/CUDA GPU (Unsloth's fast path) — not this Mac; see
+# README.md's "Where training actually runs" section.
+
+unsloth
+trl
+transformers
+datasets
+torch
+accelerate
+bitsandbytes

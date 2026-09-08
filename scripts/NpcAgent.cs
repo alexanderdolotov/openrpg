@@ -660,6 +660,30 @@ public partial class NpcAgent : Node, IWorldCharacter
     // however many NPCs x every turn, indefinitely) for what's still a
     // hot, repeating path, unlike NearbyNpcNames()/CarriedItems() below,
     // which really do change turn to turn and can't be cached this way.
+    // Nearest-first, not just insertion order — Mind.BuildAction now
+    // defaults an omitted/unrecoverable target_id (a small model that
+    // skips the argument, or a spoken "I'll grab a stick" that never
+    // names which one) to whichever entry is FIRST in the matching
+    // array, on the reasoning that a generic, impersonal target like
+    // "a stick" or "an apple" always means the nearest one to whoever
+    // said it. Returns a freshly-sorted COPY each call rather than
+    // sorting the ContentVersion-cached backing array in place — the
+    // cache is keyed on world CONTENT not changing, but which entry is
+    // nearest changes every time this NPC moves, so re-sorting on every
+    // call (cheap: at most a few dozen items) is what keeps "nearest"
+    // actually meaning nearest right now instead of nearest as of
+    // whenever the cache last rebuilt.
+    private string[] SortByDistance<T>(string[] ids, IReadOnlyList<T> objects, Func<T, Vector2> position) where T : Node2D
+    {
+        Vector2 origin = Actor.GlobalPosition;
+        int[] order = Enumerable.Range(0, ids.Length).ToArray();
+        Array.Sort(order, (a, b) => origin.DistanceTo(position(objects[a])).CompareTo(origin.DistanceTo(position(objects[b]))));
+        var sorted = new string[ids.Length];
+        for (int i = 0; i < order.Length; i++)
+            sorted[i] = ids[order[i]];
+        return sorted;
+    }
+
     private string[] _treeIds;
     private int _treeIdsVersion = -1;
     private string[] TreeIds()
@@ -671,7 +695,7 @@ public partial class NpcAgent : Node, IWorldCharacter
                 _treeIds[i] = $"tree_{i}";
             _treeIdsVersion = _world.ContentVersion;
         }
-        return _treeIds;
+        return SortByDistance(_treeIds, _world.Trees, t => t.GlobalPosition);
     }
 
     private string[] _fishingSpotIds;
@@ -685,7 +709,7 @@ public partial class NpcAgent : Node, IWorldCharacter
                 _fishingSpotIds[i] = $"fish_{i}";
             _fishingSpotIdsVersion = _world.ContentVersion;
         }
-        return _fishingSpotIds;
+        return SortByDistance(_fishingSpotIds, _world.FishingSpots, f => f.GlobalPosition);
     }
 
     private string[] _pineTreeIds;
@@ -699,7 +723,7 @@ public partial class NpcAgent : Node, IWorldCharacter
                 _pineTreeIds[i] = $"pine_{i}";
             _pineTreeIdsVersion = _world.ContentVersion;
         }
-        return _pineTreeIds;
+        return SortByDistance(_pineTreeIds, _world.PineTrees, p => p.GlobalPosition);
     }
 
     private string[] _berryBushIds;
@@ -713,7 +737,7 @@ public partial class NpcAgent : Node, IWorldCharacter
                 _berryBushIds[i] = $"berry_{i}";
             _berryBushIdsVersion = _world.ContentVersion;
         }
-        return _berryBushIds;
+        return SortByDistance(_berryBushIds, _world.BerryBushes, b => b.GlobalPosition);
     }
 
     // NOT cached the way trees/bushes are — animals actually move
@@ -1082,7 +1106,7 @@ public partial class NpcAgent : Node, IWorldCharacter
                 _stickIds[i] = _world.Sticks[i].WorldId;
             _stickIdsVersion = _world.ContentVersion;
         }
-        return _stickIds;
+        return SortByDistance(_stickIds, _world.Sticks, s => s.GlobalPosition);
     }
 
     private string[] _travelTargetIds;
@@ -1288,17 +1312,29 @@ public partial class NpcAgent : Node, IWorldCharacter
         // and follow all only work within SpeechLog.HearingRadius, and
         // knowing WHO (not just that someone) is nearby is what makes
         // "declare something and see who's around" or "follow Wren" a
-        // real, groundable decision rather than a guess.
-        foreach (IWorldCharacter other in _world.Agents)
-        {
-            if (other.Id == Id)
-                continue;
-            int dist = (int)Actor.GlobalPosition.DistanceTo(other.GlobalPosition);
-            if (dist <= SpeechLog.HearingRadius)
-                lines.Add($"{other.DisplayName} is nearby, {dist} px away, feeling {other.CurrentEmotion.ToWireString()}.");
-        }
+        // real, groundable decision rather than a guess. Nearest-N, same
+        // cap and same reasoning as AppendNearestResources above (see its
+        // own comment) — a direct request/heard line always survives
+        // regardless (added earlier, unconditionally), only exhaustive
+        // "who's nearby" listings ever get trimmed if the roster or
+        // population grows past what's worth spending prompt budget on;
+        // which specific extra rabbit or bystander gets left off doesn't
+        // change the decision, since the closest ones are always the
+        // most actionable ones anyway.
+        List<(IWorldCharacter Other, int Dist)> nearbyAgents = _world.Agents
+            .Where(other => other.Id != Id)
+            .Select(other => (other, (int)Actor.GlobalPosition.DistanceTo(other.GlobalPosition)))
+            .Where(pair => pair.Item2 <= SpeechLog.HearingRadius)
+            .OrderBy(pair => pair.Item2)
+            .Take(NearbyResourceCount)
+            .ToList();
+        foreach ((IWorldCharacter other, int dist) in nearbyAgents)
+            lines.Add($"{other.DisplayName} is nearby, {dist} px away, feeling {other.CurrentEmotion.ToWireString()}.");
 
-        // Wild animals — same hearing-range scoping as everyone above.
+        // Wild animals — same hearing-range scoping and same nearest-N
+        // cap as nearby people above (a rabbit population that's grown
+        // large, or several clustered near a food source, shouldn't cost
+        // more prompt budget than any other kind of "what's around").
         // Framed with enough to actually judge the situation (species,
         // distance, whether it's actively coming for YOU or someone
         // else specifically) without exposing raw internal numbers
@@ -1309,11 +1345,14 @@ public partial class NpcAgent : Node, IWorldCharacter
         // this is what feeds NpcAgent's own is_alert handling (see
         // DetectAlertAnimal/HandleAlert) into the LLM's normal turn
         // too, not just this NPC's own mechanical reflex to it.
-        foreach (Animal a in _world.Animals)
+        List<(Animal Animal, int Dist)> nearbyAnimals = _world.Animals
+            .Select(a => (a, (int)Actor.GlobalPosition.DistanceTo(a.GlobalPosition)))
+            .Where(pair => pair.Item2 <= SpeechLog.HearingRadius)
+            .OrderBy(pair => pair.Item2)
+            .Take(NearbyResourceCount)
+            .ToList();
+        foreach ((Animal a, int dist) in nearbyAnimals)
         {
-            int dist = (int)Actor.GlobalPosition.DistanceTo(a.GlobalPosition);
-            if (dist > SpeechLog.HearingRadius)
-                continue;
             string species = a switch { Wolf => "wolf", Bear => "bear", Rabbit => "rabbit", _ => "animal" };
             bool hostileNow = a.CurrentState == Animal.State.Attacking || a.CurrentState == Animal.State.Chasing;
             string note;
@@ -1331,15 +1370,18 @@ public partial class NpcAgent : Node, IWorldCharacter
         // Sticks on the ground — NOT AppendNearestResources (that
         // reconstructs "{prefix}_{list index}", which breaks here the
         // same way it would for animals: a stick can be picked up from
-        // the middle of the list, shifting every later index. Sticks
-        // are few enough that "every one within range" (not just
-        // nearest-N) is fine to list in full.
-        foreach (Stick s in _world.Sticks)
-        {
-            int dist = (int)Actor.GlobalPosition.DistanceTo(s.GlobalPosition);
-            if (dist <= SpeechLog.HearingRadius)
-                lines.Add($"{s.WorldId} (stick): {dist} px away, lying on the ground.");
-        }
+        // the middle of the list, shifting every later index), but still
+        // the same nearest-N cap, same reasoning — currently always a
+        // small handful in practice, capped anyway so a future content
+        // change that scatters more sticks around doesn't reopen this.
+        List<(Stick Stick, int Dist)> nearbySticks = _world.Sticks
+            .Select(s => (s, (int)Actor.GlobalPosition.DistanceTo(s.GlobalPosition)))
+            .Where(pair => pair.Item2 <= SpeechLog.HearingRadius)
+            .OrderBy(pair => pair.Item2)
+            .Take(NearbyResourceCount)
+            .ToList();
+        foreach ((Stick s, int dist) in nearbySticks)
+            lines.Add($"{s.WorldId} (stick): {dist} px away, lying on the ground.");
 
         lines.Add($"You are carrying: {Actor.Inventory.Describe()}.");
         lines.Add($"You are currently feeling {Actor.CurrentEmotion.ToWireString()}.");

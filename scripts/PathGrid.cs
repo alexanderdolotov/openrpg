@@ -23,6 +23,21 @@ public static class PathGrid
     private static bool[,] _blocked;
     private static bool _built;
 
+    // For each obstacle, only checks the small local box of cells its
+    // OWN inflated radius could possibly reach — not, as this used to,
+    // every single cell in the whole grid checked against every
+    // obstacle (O(cols×rows×obstacles)). That was fine while area was
+    // a small, fixed village rect; once it started growing to actually
+    // cover wherever content gets generated (see Main.
+    // ComputePathGridArea), the same handful of obstacles started
+    // paying for a full sweep of a grid tens of thousands of cells
+    // larger — a real, measured tens-of-milliseconds hitch per rebuild
+    // (Main's own BuildPathGrid runs this after every new object
+    // exploration generates), not a hypothetical cost. This is
+    // O(obstacles × (radius/CellSize)²) instead — a football-sized
+    // obstacle circle costs the same to rasterize whether the grid
+    // around it is a small village or the full map, which is what
+    // actually varies here, not the obstacle count.
     public static void Build(Rect2 area, IEnumerable<(Vector2 Center, float Radius)> obstacles)
     {
         _origin = area.Position;
@@ -30,22 +45,21 @@ public static class PathGrid
         _rows = Mathf.CeilToInt(area.Size.Y / CellSize);
         _blocked = new bool[_cols, _rows];
 
-        var inflated = new List<(Vector2 Center, float Radius)>();
         foreach ((Vector2 center, float radius) in obstacles)
-            inflated.Add((center, radius + NpcClearance));
-
-        for (int x = 0; x < _cols; x++)
         {
-            for (int y = 0; y < _rows; y++)
+            float inflated = radius + NpcClearance;
+            Vector2 local = center - _origin;
+            int minX = Mathf.Max(0, Mathf.FloorToInt((local.X - inflated) / CellSize));
+            int maxX = Mathf.Min(_cols - 1, Mathf.CeilToInt((local.X + inflated) / CellSize));
+            int minY = Mathf.Max(0, Mathf.FloorToInt((local.Y - inflated) / CellSize));
+            int maxY = Mathf.Min(_rows - 1, Mathf.CeilToInt((local.Y + inflated) / CellSize));
+
+            for (int x = minX; x <= maxX; x++)
             {
-                Vector2 cellCenter = CellToWorld(x, y);
-                foreach ((Vector2 center, float radius) in inflated)
+                for (int y = minY; y <= maxY; y++)
                 {
-                    if (cellCenter.DistanceTo(center) <= radius)
-                    {
+                    if (!_blocked[x, y] && CellToWorld(x, y).DistanceTo(center) <= inflated)
                         _blocked[x, y] = true;
-                        break;
-                    }
                 }
             }
         }

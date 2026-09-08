@@ -54,6 +54,23 @@ public abstract partial class Animal : CharacterBody2D, ICombatant
     protected virtual float RestThreshold => 30f; // below this, tired enough to actually go rest rather than keep wandering/foraging
     public bool NeedsRest => Fatigue < RestThreshold;
 
+    // Below this fraction of MaxHunger, resting is no longer allowed to
+    // win — a real, reported bug without this carve-out: an animal
+    // that started resting while already hungry would stay committed
+    // (see this property's own header on why that commitment exists)
+    // for the ENTIRE recovery, up to ~15 real seconds, with Hunger only
+    // ever draining further the whole time — "sleeping when Fatigue is
+    // already full, but nearly starving" is the endpoint of exactly
+    // that: fully rested with nothing left to interrupt the nap FOR,
+    // while still critically hungry. Deliberately far below each
+    // species' own "go find food" threshold (0.7 for Rabbit, see its
+    // DecideBehavior) rather than equal to it — the flicker this
+    // commitment mechanism exists to prevent is specifically about
+    // Hunger drifting back and forth across THAT everyday threshold
+    // mid-rest, not about a genuine emergency low enough to risk
+    // actually starving to death rather than interrupt a nap for it.
+    private const float CriticalHungerFraction = 0.15f;
+
     // "Animals need to sleep for a period of time to restore fatigue,
     // unless interrupted by being attacked" — a real, reported bug
     // without this: DecideBehavior re-evaluates completely fresh every
@@ -66,12 +83,12 @@ public abstract partial class Animal : CharacterBody2D, ICombatant
     // completing one. Once actually resting, this stays true (and
     // species' own DecideBehavior checks it FIRST, right after their
     // own "defend if attacked" check, returning early without
-    // reconsidering anything else) until Fatigue is fully restored —
-    // Fatigue only ever goes UP while resting (Act()'s own Resting
-    // case) and only down otherwise, so this alone is enough to commit
-    // to "keep resting" without a separate timer to track and rewind
-    // if the rest gets legitimately interrupted.
-    public bool IsCommittedToResting => _state == State.Resting && Fatigue < MaxFatigue;
+    // reconsidering anything else) until Fatigue is fully restored OR
+    // Hunger drops below CriticalHungerFraction above — real self-
+    // preservation, not the routine equilibrium-crossing churn this
+    // commitment exists to block in the first place.
+    public bool IsCommittedToResting =>
+        _state == State.Resting && Fatigue < MaxFatigue && Hunger >= MaxHunger * CriticalHungerFraction;
     protected virtual float MoveSpeed => 70f;
     protected virtual float DetectionRadius => 220f; // how far this animal notices food/threats/prey at all
     protected virtual float EatRange => 40f;
@@ -404,14 +421,28 @@ public abstract partial class Animal : CharacterBody2D, ICombatant
 
     // Shared by every predator species: close enough to already swing,
     // or still need to close the distance first. Only logs on an
-    // actual NEW engagement (a different target than whatever it was
-    // already going after) — DecideBehavior calls this again every
-    // single physics tick for as long as a chase continues, so
-    // logging unconditionally here would spam the console at 60/sec
-    // instead of reading as one real event.
+    // actual NEW engagement — entering Chasing/Attacking from some
+    // other state — not on every single physics tick a chase
+    // continues, which DecideBehavior calls this on for as long as it
+    // lasts.
+    //
+    // Checked against _state alone now, not "is this a different
+    // TargetNode than last tick" — that used to also let TWO predators
+    // converging on the SAME victim spam this: FindNearestAnimal()
+    // picks whichever is nearest fresh every tick, and with two
+    // pursuers at close to equal distance, "nearest" flickers back and
+    // forth between them frame to frame, so TargetNode kept "changing"
+    // every tick even though this animal never stopped chasing anyone
+    // — a real, observed case (a wolf/bear circling with another
+    // predator produced a genuine 60/sec log line). Once already
+    // Chasing/Attacking, switching which specific victim is nearest
+    // isn't a new engagement worth its own line; genuinely finishing
+    // one chase and starting an unrelated later one still logs, since
+    // _state passes back through something else (Wandering, Resting,
+    // ...) in between.
     protected void SetChaseOrAttack(Node2D victim, string reason = null)
     {
-        if (!ReferenceEquals(TargetNode, victim))
+        if (_state is not (State.Chasing or State.Attacking))
         {
             string reasonNote = reason != null ? $" ({reason})" : "";
             LogEvent($"goes after {DescribeTarget(victim)}{reasonNote}", "d8a97a");
@@ -421,12 +452,18 @@ public abstract partial class Animal : CharacterBody2D, ICombatant
     }
 
     // The flee equivalent of SetChaseOrAttack above — same "only log a
-    // genuinely new reaction" treatment, used by any species that
-    // flees (currently just Rabbit, but shared here rather than
-    // reimplemented per species that gets a flee instinct later).
+    // genuinely new reaction, checked against _state alone so two
+    // simultaneous pursuers can't spam this by making 'nearest threat'
+    // flicker between them" treatment, used by any species that flees
+    // (currently just Rabbit, but shared here rather than reimplemented
+    // per species that gets a flee instinct later). Level 2 only —
+    // unlike SetChaseOrAttack, "from" here is always another animal,
+    // never a human, so there's no "but this might be a real threat to
+    // the player" case to keep visible at level 1; see GameSettings.
+    // LogLevel's own header.
     protected void SetFleeing(Node2D from, string reason = null)
     {
-        if (_state != State.Fleeing || !ReferenceEquals(TargetNode, from))
+        if (_state != State.Fleeing && GameSettings.LogLevel >= 2)
         {
             string reasonNote = reason != null ? $" ({reason})" : "";
             LogEvent($"flees from {DescribeTarget(from)}{reasonNote}", "d8a97a");

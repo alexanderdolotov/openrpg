@@ -1,13 +1,15 @@
 using Godot;
 
 // A small floating readout above a character's or animal's head — up
-// to three thin bars (Health always; Fatigue only when the owner
-// actually has the concept, i.e. a human, not an animal; Hunger for
-// both, since every living thing has that now — see Vitals/Animal's
-// own Hunger). Purely a visual — nothing here feeds back into
-// gameplay, and it has zero opinion about where the numbers come
-// from; the owner (NPCActor/Animal) calls Refresh() with fresh
-// fractions whenever its own vitals change.
+// to three thin bars (Health and Hunger always; Fatigue whenever the
+// owner passes a real value for it, which by now is every human AND
+// every Animal — see Animal.cs's own Fatigue). fatigueFrac stays a
+// nullable float rather than a plain one specifically so a FUTURE
+// owner with no Fatigue concept at all can still omit the bar cleanly,
+// not because animals currently do. Purely a visual — nothing here
+// feeds back into gameplay, and it has zero opinion about where the
+// numbers come from; the owner (NPCActor/Animal) calls Refresh() with
+// fresh fractions whenever its own vitals change.
 //
 // Toggleable via GameSettings.ShowVitalsBars, checked every frame
 // rather than once — flipping the setting mid-game needs to hide/show
@@ -29,8 +31,10 @@ public partial class VitalsBarDisplay : Node2D
     private bool _showFatigue;
 
     // fatigueFrac null means "this owner has no Fatigue concept at
-    // all" (every wild animal) — draws two bars instead of three
-    // rather than a fake full/empty one.
+    // all" — draws two bars instead of three rather than a fake
+    // full/empty one. Every current owner (human or Animal) does pass
+    // a real value; this stays nullable for whatever future owner
+    // doesn't, same as before Animal itself gained a Fatigue stat.
     public void Refresh(float healthFrac, float? fatigueFrac, float hungerFrac)
     {
         _health = Mathf.Clamp(healthFrac, 0f, 1f);

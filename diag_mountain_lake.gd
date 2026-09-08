@@ -35,4 +35,13 @@ func _initialize():
 				all_clear = false
 	print("lake clears every REAL mountain flank shape: ", all_clear)
 
+	var foothills = main.get_node("Foothills")
+	var forest = main.get_node("Forest")
+	var dist_fh = lake.position.distance_to(foothills.position)
+	var needed_fh = lake_r + foothills.Radius + 12.0
+	print("Foothills dist=", dist_fh, " needed=", needed_fh, " clear: ", dist_fh >= needed_fh)
+	var dist_forest = lake.position.distance_to(forest.position)
+	var needed_forest = lake_r + forest.PatchRadius * 0.85 + 12.0
+	print("Forest dist=", dist_forest, " needed=", needed_forest, " clear: ", dist_forest >= needed_forest)
+
 	quit()

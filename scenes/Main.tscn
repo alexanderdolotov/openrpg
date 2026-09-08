@@ -132,11 +132,6 @@ focus_mode = 0
 visible = false
 text = "Travel"
 
-[node name="FollowButton" type="Button" parent="UI/ActionPanel"]
-focus_mode = 0
-visible = false
-text = "Follow"
-
 [node name="TradeButton" type="Button" parent="UI/ActionPanel"]
 focus_mode = 0
 visible = false

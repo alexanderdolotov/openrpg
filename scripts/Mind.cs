@@ -537,13 +537,38 @@ public class Mind
     // exhaustive map for all eighteen — everything else simply isn't
     // recovered from a hedgy speak reply, which just means the speak
     // stands as spoken, same as before this existed.
+    // pick_up_stick/pick_apple/catch_fish/gather_pinecone/gather_berry
+    // got a much wider phrase net than the original handful here — a
+    // real, observed failure ("Finn, go find a stick" / "Maren go find
+    // some sticks" never recovered, across several rephrasings, because
+    // NONE of them said the one exact phrase "pick up the stick"/"grab
+    // the stick" this list originally had). Now that BuildAction can
+    // actually resolve one of these five to a real nearby target
+    // without the text ever naming which one (see its own header),
+    // the phrase-matching side needed to stop being the narrower
+    // bottleneck — these are asked-for constantly and phrased a dozen
+    // different ordinary ways, unlike make_torch/light_fire/cook_meat/
+    // follow/attack/eat/sleep, which stay closer to their original,
+    // narrower set.
     private static readonly (string Action, string Phrase)[] SpokenIntentPhrases =
     {
-        ("make_torch", "make a torch"), ("make_torch", "light a torch"),
-        ("light_fire", "light the fire"), ("light_fire", "light it"),
-        ("cook_meat", "cook the meat"), ("cook_meat", "cook it"),
+        ("make_torch", "make a torch"), ("make_torch", "light a torch"), ("make_torch", "craft a torch"),
+        ("light_fire", "light the fire"), ("light_fire", "light it"), ("light_fire", "start the fire"),
+        ("cook_meat", "cook the meat"), ("cook_meat", "cook it"), ("cook_meat", "cook some meat"),
         ("follow", "follow you"), ("follow", "come with you"),
-        ("pick_up_stick", "pick up the stick"), ("pick_up_stick", "grab the stick"),
+        ("pick_up_stick", "pick up the stick"), ("pick_up_stick", "pick up a stick"), ("pick_up_stick", "grab the stick"), ("pick_up_stick", "grab a stick"),
+        ("pick_up_stick", "find a stick"), ("pick_up_stick", "find some sticks"), ("pick_up_stick", "find sticks"),
+        ("pick_up_stick", "get a stick"), ("pick_up_stick", "get some sticks"), ("pick_up_stick", "get sticks"),
+        ("pick_up_stick", "look for a stick"), ("pick_up_stick", "look for sticks"),
+        ("pick_up_stick", "collect a stick"), ("pick_up_stick", "collect some sticks"), ("pick_up_stick", "collect sticks"),
+        ("pick_up_stick", "gather a stick"), ("pick_up_stick", "gather some sticks"), ("pick_up_stick", "gather sticks"),
+        ("pick_apple", "pick an apple"), ("pick_apple", "pick some apples"), ("pick_apple", "get an apple"), ("pick_apple", "get some apples"),
+        ("pick_apple", "grab an apple"), ("pick_apple", "collect some apples"), ("pick_apple", "gather some apples"), ("pick_apple", "find an apple"),
+        ("catch_fish", "catch a fish"), ("catch_fish", "catch some fish"), ("catch_fish", "go fishing"), ("catch_fish", "get some fish"),
+        ("gather_pinecone", "get a pinecone"), ("gather_pinecone", "get some pinecones"), ("gather_pinecone", "collect pinecones"),
+        ("gather_pinecone", "collect some pinecones"), ("gather_pinecone", "gather pinecones"), ("gather_pinecone", "find some pinecones"),
+        ("gather_berry", "get some berries"), ("gather_berry", "collect some berries"), ("gather_berry", "gather some berries"),
+        ("gather_berry", "pick some berries"), ("gather_berry", "find some berries"), ("gather_berry", "find berries"),
         ("attack", "fight it"), ("attack", "attack it"),
         ("eat", "eat it"), ("eat", "eat something"),
         ("sleep", "get some sleep"), ("sleep", "go to sleep"),
@@ -656,6 +681,36 @@ public class Mind
     // of which path it came from.
     private ParseResult BuildAction(string name, string targetId, Emotion emotion, string item, int amount, string spokenMessage, AvailableTargets targets)
     {
+        // "A stick," "an apple," "a fish" — every one of these five
+        // targets is generic and impersonal: nobody, in speech OR in a
+        // small model's own tool-call arguments, ever names WHICH
+        // tree/bush/spot/stick they mean, unlike follow/trade/steal/
+        // attack, which target an actual named character or animal
+        // where guessing would mean picking the WRONG specific person.
+        // Same "default rather than fail on an unambiguous omission" as
+        // deposit's own long-standing enum-of-one case just below,
+        // generalized to an enum-of-many: default to whichever entry is
+        // FIRST, which NpcAgent's own TreeIds()/FishingSpotIds()/
+        // PineTreeIds()/BerryBushIds()/StickIds() now sort nearest-to-
+        // this-NPC first specifically so "first" means something real.
+        // This is what makes "Finn, go find a stick" actually able to
+        // resolve to a real, nearby stick_id — TryRecoverCommittedAction
+        // can find the PHRASE "find a stick" in what Finn said, but
+        // spoken English never contains the literal id "stick_3," so
+        // without this default every recovery attempt for these five
+        // actions had no legal target and silently failed every time,
+        // even when the phrase matched perfectly.
+        if (targetId == "")
+            targetId = name switch
+            {
+                "pick_apple" => targets.TreeIds?.FirstOrDefault() ?? "",
+                "catch_fish" => targets.FishingSpotIds?.FirstOrDefault() ?? "",
+                "gather_pinecone" => targets.PineTreeIds?.FirstOrDefault() ?? "",
+                "gather_berry" => targets.BerryBushIds?.FirstOrDefault() ?? "",
+                "pick_up_stick" => targets.StickIds?.FirstOrDefault() ?? "",
+                _ => targetId,
+            };
+
         switch (name)
         {
             case "pick_apple":

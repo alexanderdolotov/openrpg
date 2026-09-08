@@ -33,6 +33,18 @@ public partial class GatherableFoliage : StaticBody2D, IInteractable, IHasVisual
     // either) — "no boundaries" means both, not just one.
     [Export] public bool Walkable = false;
 
+    // 0 (the default) means never — a berry bush or pinecone tree
+    // stays a real, permanently-managed resource once picked clean,
+    // same as always. Grass opts in with a real number: it went
+    // through a Count=9999 "basically unlimited" patch first (see git
+    // history) after every rabbit AND bear on the map turned out to be
+    // drawing from the same non-renewing Count=2 pool — 8 patches × 2
+    // bites was a hard cap of 16 meals for the entire wildlife
+    // population, ever. Actual regrowth is the more honest fix than
+    // "unlimited": depleted for a while reads as a real, finite patch;
+    // silently uncapped doesn't.
+    [Export] public float RegenSeconds = 0f;
+
     private const float GatherExertion = 3f; // same as AppleTree's
 
     private static readonly Dictionary<string, Texture2D> _textureCache = new();
@@ -41,8 +53,25 @@ public partial class GatherableFoliage : StaticBody2D, IInteractable, IHasVisual
     private Sprite2D _sprite;
     private Vector2 _textureSize;
 
+    // Count itself only ever counts down (TryInteract/AnimalEat) —
+    // _maxCount is what a full regen restocks back up to, captured once
+    // here rather than re-derived, since Count is the same field being
+    // drained.
+    private int _maxCount;
+    private float _regenTimer;
+
     public override void _Ready()
     {
+        _maxCount = Count;
+
+        // Skips this node's own _Process call entirely (not just an
+        // early-return inside it) for the common case — a pinecone
+        // tree never opts into regen, and there can be a lot of these
+        // by the time a long session's procedural growth is done. No
+        // reason to make Godot's scheduler visit every one of them 60
+        // times a second just to immediately bail on RegenSeconds<=0.
+        SetProcess(RegenSeconds > 0f);
+
         if (!Walkable)
             AddChild(new CollisionShape2D { Shape = new CircleShape2D { Radius = TrunkRadius } });
 
@@ -63,6 +92,27 @@ public partial class GatherableFoliage : StaticBody2D, IInteractable, IHasVisual
             Modulate = Count > 0 ? Tint : Tint * DepletedMultiplier,
         };
         AddChild(_sprite);
+    }
+
+    // Ticks the regrowth clock — reset to 0 by every successful pick
+    // (TryInteract/AnimalEat below), so continuous grazing/gathering
+    // keeps deferring it, the same shape FirePit's own LitDuration/
+    // TorchDuration countdowns already use elsewhere in this project.
+    // A no-op whenever RegenSeconds is 0 (the default) or Count's
+    // already back at full, so this costs nothing for the vast
+    // majority of GatherableFoliage instances that never opt in.
+    public override void _Process(double delta)
+    {
+        if (RegenSeconds <= 0f || Count >= _maxCount)
+            return;
+
+        _regenTimer += (float)delta;
+        if (_regenTimer < RegenSeconds)
+            return;
+
+        Count = _maxCount;
+        _regenTimer = 0f;
+        _sprite.Modulate = Tint;
     }
 
     public Rect2 GetLocalBounds() => new(-_textureSize.X * SpriteScale / 2f, -_textureSize.Y * SpriteScale, _textureSize.X * SpriteScale, _textureSize.Y * SpriteScale);
@@ -89,6 +139,7 @@ public partial class GatherableFoliage : StaticBody2D, IInteractable, IHasVisual
             return new InteractResult(false, "fumbled", data);
 
         Count--;
+        _regenTimer = 0f; // still being picked from — defers regrowth, same as AnimalEat below
         actor.Inventory.Add(ItemName);
         if (Count <= 0)
             _sprite.Modulate = Tint * DepletedMultiplier;
@@ -99,11 +150,12 @@ public partial class GatherableFoliage : StaticBody2D, IInteractable, IHasVisual
     // A wild animal eating directly — no roll, no Inventory, no
     // IInteractable dance (that whole contract is built around a human
     // actor). Just "is there anything left," and if so, one unit gone.
-    // Bear's own DecideBehavior() is the only caller today.
+    // Bear's/Rabbit's own DecideBehavior() are the only callers today.
     public bool AnimalEat()
     {
         if (Count <= 0) return false;
         Count--;
+        _regenTimer = 0f; // still being grazed — defers regrowth, same as TryInteract above
         if (Count <= 0)
             _sprite.Modulate = Tint * DepletedMultiplier;
         return true;

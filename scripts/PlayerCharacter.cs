@@ -7,7 +7,7 @@ using System.Collections.Generic;
 // stats, and action-resolution from scratch. Clicking a button in the
 // action panel below calls AssignAction() — the exact same call
 // NpcAgent makes after Mind.Decide() — so pick_apple, catch_fish,
-// deposit, travel, follow, trade, and steal all execute
+// deposit, travel, trade, and steal all execute
 // through the identical AssignAction()/ProcessAttempting()/
 // TryInteract() (or SkillCheck) pipeline an NPC's decision does. The
 // only real difference from an NPC is WHAT decides the action: WASD and
@@ -49,7 +49,6 @@ public partial class PlayerCharacter : NPCActor, IWorldCharacter
     private Button _gatherBerryButton;
     private Button _depositButton;
     private Button _travelButton;
-    private Button _followButton;
     private Button _tradeButton;
     private Button _stealButton;
     private Button _attackButton;
@@ -79,7 +78,6 @@ public partial class PlayerCharacter : NPCActor, IWorldCharacter
     private GameAction _gatherBerryTarget;
     private GameAction _depositTarget;
     private GameAction _travelTarget;
-    private GameAction _followTarget;
     private GameAction _tradeTarget;
     private GameAction _stealTarget;
     private GameAction _attackTarget;
@@ -128,7 +126,6 @@ public partial class PlayerCharacter : NPCActor, IWorldCharacter
         _gatherBerryButton = actionPanel.GetNode<Button>("GatherBerryButton");
         _depositButton = actionPanel.GetNode<Button>("DepositButton");
         _travelButton = actionPanel.GetNode<Button>("TravelButton");
-        _followButton = actionPanel.GetNode<Button>("FollowButton");
         _tradeButton = actionPanel.GetNode<Button>("TradeButton");
         _stealButton = actionPanel.GetNode<Button>("StealButton");
         _attackButton = actionPanel.GetNode<Button>("AttackButton");
@@ -138,7 +135,7 @@ public partial class PlayerCharacter : NPCActor, IWorldCharacter
         _lightFireButton = actionPanel.GetNode<Button>("LightFireButton");
         _makeTorchButton = actionPanel.GetNode<Button>("MakeTorchButton");
         _cookMeatButton = actionPanel.GetNode<Button>("CookMeatButton");
-        _allButtons = new[] { _pickAppleButton, _catchFishButton, _gatherPineconeButton, _gatherBerryButton, _depositButton, _travelButton, _followButton, _tradeButton, _stealButton, _attackButton, _eatButton, _pickUpStickButton, _sleepButton, _lightFireButton, _makeTorchButton, _cookMeatButton };
+        _allButtons = new[] { _pickAppleButton, _catchFishButton, _gatherPineconeButton, _gatherBerryButton, _depositButton, _travelButton, _tradeButton, _stealButton, _attackButton, _eatButton, _pickUpStickButton, _sleepButton, _lightFireButton, _makeTorchButton, _cookMeatButton };
 
         _pickAppleButton.Pressed += () => TryAssign(_pickAppleButton, _pickAppleTarget);
         _catchFishButton.Pressed += () => TryAssign(_catchFishButton, _catchFishTarget);
@@ -146,7 +143,6 @@ public partial class PlayerCharacter : NPCActor, IWorldCharacter
         _gatherBerryButton.Pressed += () => TryAssign(_gatherBerryButton, _gatherBerryTarget);
         _depositButton.Pressed += () => TryAssign(_depositButton, _depositTarget);
         _travelButton.Pressed += () => TryAssign(_travelButton, _travelTarget);
-        _followButton.Pressed += () => TryAssign(_followButton, _followTarget);
         _tradeButton.Pressed += () => TryAssign(_tradeButton, _tradeTarget);
         _stealButton.Pressed += () => TryAssign(_stealButton, _stealTarget);
         _attackButton.Pressed += () => TryAssign(_attackButton, _attackTarget);
@@ -425,11 +421,6 @@ public partial class PlayerCharacter : NPCActor, IWorldCharacter
         }
         _travelButton.Visible = _travelTarget != null;
 
-        IWorldCharacter nearest = NearestOtherCharacter(ActionRanges.Follow);
-        _followTarget = nearest != null ? new GameAction("follow", nearest.DisplayName, ActionRanges.Follow) : null;
-        if (nearest != null) _followButton.Text = $"Follow {nearest.DisplayName}";
-        _followButton.Visible = _followTarget != null;
-
         IWorldCharacter tradeTarget = NearestOtherCharacter(ActionRanges.Trade);
         string firstCarried = null;
         foreach (string item in Inventory.All.Keys) { firstCarried = item; break; }
@@ -498,7 +489,6 @@ public partial class PlayerCharacter : NPCActor, IWorldCharacter
             (_gatherBerryButton, _gatherBerryTarget),
             (_depositButton, _depositTarget),
             (_travelButton, _travelTarget),
-            (_followButton, _followTarget),
             (_tradeButton, _tradeTarget),
             (_stealButton, _stealTarget),
             (_attackButton, _attackTarget),
@@ -675,7 +665,6 @@ public partial class PlayerCharacter : NPCActor, IWorldCharacter
             "gather_berry" => $"{DisplayName} picks a berry from a bush.",
             "deposit" => $"{DisplayName} deposits their haul at home.",
             "travel" => $"{DisplayName} arrives at {targetId}.",
-            "follow" => $"{DisplayName} walks up alongside {targetId}.",
             "attack" => $"{DisplayName} strikes {targetId}!",
             "eat" => $"{DisplayName} eats something to recover.",
             "pick_up_stick" => $"{DisplayName} picks up a stick.",

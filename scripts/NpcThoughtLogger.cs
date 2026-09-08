@@ -34,6 +34,19 @@ public class NpcThoughtLogger
     private string _lastKind;
     private string _lastText;
 
+    // Opened once, kept open for the life of the run, instead of
+    // File.AppendAllText's own open-write-close every single call. That
+    // used to mean a full file-handle open/close syscall for every NPC
+    // thought/speech/combat line — cheap on a plain local disk, but this
+    // project's logs/ directory lives inside an OneDrive-synced folder
+    // (see this session's own earlier brush with a stale-read glitch on
+    // Mind.cs from that same sync layer), where each of those opens can
+    // stall waiting on the sync client rather than returning instantly.
+    // AutoFlush keeps the file as current on disk as AppendAllText's
+    // per-call close always was — this only removes the repeated
+    // open/close, not the durability.
+    private StreamWriter _writer;
+
     public NpcThoughtLogger(bool enabled)
     {
         _enabled = enabled;
@@ -44,6 +57,7 @@ public class NpcThoughtLogger
         try
         {
             Directory.CreateDirectory(LogDir);
+            _writer = new StreamWriter(_logPath, append: true) { AutoFlush = true };
         }
         catch (IOException) { /* best-effort, see Log() */ }
         catch (UnauthorizedAccessException) { /* same */ }
@@ -51,7 +65,7 @@ public class NpcThoughtLogger
 
     public void Log(string npcId, string kind, string text)
     {
-        if (!_enabled)
+        if (!_enabled || _writer == null)
             return;
 
         // "If prev row is exact same, don't log it" — same collapsing
@@ -66,8 +80,7 @@ public class NpcThoughtLogger
 
         try
         {
-            string line = $"[{DateTime.Now:yyyy-MM-dd HH:mm:ss}] {npcId} {kind}: {text}";
-            File.AppendAllText(_logPath, line + Environment.NewLine);
+            _writer.WriteLine($"[{DateTime.Now:yyyy-MM-dd HH:mm:ss}] {npcId} {kind}: {text}");
         }
         catch (IOException)
         {
@@ -77,5 +90,34 @@ public class NpcThoughtLogger
         {
             // same
         }
+        catch (ObjectDisposedException)
+        {
+            // Close() already ran (Exit button / window close) but an
+            // in-flight NPC decision — an async HTTP call already
+            // waiting on Ollama when Close() fired — can still resume
+            // and call Log() afterward. The _writer==null guard above
+            // is the normal path that stops this; this is the belt-
+            // and-suspenders fallback for the same reason every other
+            // failure here is swallowed instead of thrown.
+        }
+    }
+
+    // Best-effort close, same posture as Log() itself — a debug log
+    // that fails to close cleanly at shutdown still shouldn't be an
+    // error anywhere in the caller. Main.cs calls this from every path
+    // that ends this run's logger — the Exit button, the OS window's
+    // close button, and both restart paths (death, settings-panel
+    // Restart), since ReloadCurrentScene() re-runs Main._Ready() and
+    // hands _thoughtLog a brand new instance without this call, the
+    // previous one's file handle would just leak until GC finalizes it.
+    // Nulling _writer (not just disposing it) is what makes Log()'s own
+    // `_writer == null` guard correctly skip a call arriving after
+    // Close() — safe to call more than once, or with nothing to close.
+    public void Close()
+    {
+        try { _writer?.Dispose(); }
+        catch (IOException) { }
+        catch (ObjectDisposedException) { }
+        _writer = null;
     }
 }

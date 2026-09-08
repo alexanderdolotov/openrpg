@@ -21,7 +21,29 @@ public partial class NPCActor : CharacterBody2D, ICombatant
     public delegate void DownedEventHandler();
 
     private const float Speed = 120f;
-    private const float UnreachableTimeout = 10f; // seconds spent closing distance before giving up — sized for the longest realistic walk (home to the far fishing spot, ~770px), not the old tighter layout
+
+    // Scaled from the ACTUAL straight-line distance to wherever this
+    // specific action is walking toward (computed once in AssignAction,
+    // see _unreachableTimeout below) rather than one fixed number for
+    // every walk — a flat constant here used to assume every trip was
+    // roughly the same short hop across the original village (it was
+    // tuned as "10s, sized for the longest realistic walk — home to the
+    // far fishing spot, ~770px"), which stopped being true once
+    // gatherable targets started always resolving to the nearest REAL
+    // instance however far that is (see NpcAgent's own SortByDistance)
+    // on a map that's since grown well past 770px in any direction: a
+    // perfectly real, walkable few-thousand-px trek to the only stick
+    // left got aborted as "unreachable" at the exact same 10s a next-
+    // door trip would, as if something were actually blocking the way
+    // rather than it just being far. UnreachableSafetyFactor is slack
+    // over the theoretical walk time (distance/Speed) for imperfect
+    // A*-routed/steering movement, which is never a dead-straight line
+    // at full Speed; UnreachableTimeoutFloor keeps a short, nearby trip
+    // the same real slack the old flat constant always gave it.
+    private const float UnreachableTimeoutFloor = 10f;
+    private const float UnreachableSafetyFactor = 1.75f;
+    private static float ComputeUnreachableTimeout(float distance) =>
+        Mathf.Max(UnreachableTimeoutFloor, distance / Speed * UnreachableSafetyFactor);
 
     // protected, not private — PlayerCharacter subclasses this to add
     // free-movement input handling on top of the same state machine,
@@ -146,13 +168,14 @@ public partial class NPCActor : CharacterBody2D, ICombatant
 
     private Node2D _targetNode;
     private float _elapsed = 0f;
+    private float _unreachableTimeout = UnreachableTimeoutFloor; // recomputed per-action in AssignAction; this default only matters before the first action ever assigned
 
     // How long State.Attempting sits there before actually resolving —
     // reaching for an apple, casting a line, reaching into someone's
     // pocket all take a beat, not an instant frame the moment you're in
     // range. A SEPARATE counter from _elapsed on purpose: _elapsed is
     // already mid-count by the time Attempting starts for anything that
-    // needed to walk there first (it's tracking UnreachableTimeout
+    // needed to walk there first (it's tracking _unreachableTimeout
     // during Navigating), so reusing it here would let the attempt
     // resolve on literally the first frame for every action that
     // required travel — defeating the whole point. Reset at both
@@ -169,6 +192,42 @@ public partial class NPCActor : CharacterBody2D, ICombatant
     private List<Vector2> _waypoints;
     private int _waypointIndex;
     private const float WaypointTolerance = 14f;
+
+    // "follow"/"trade"/"steal"/"attack" target something that MOVES, so
+    // they default to walking straight at the target's live position
+    // every physics frame — cheap, and correct the overwhelming
+    // majority of the time (open ground, nothing in the way), unlike
+    // routing through PathGrid up front for a target that'll have
+    // moved by the time a route finishes computing anyway. PathGrid
+    // only gets consulted reactively, when direct pursuit actually
+    // stops working: ProcessNavigating() tracks real displacement (not
+    // distance-to-target — a target that's simply walking away
+    // shouldn't count as "stuck") on a short timer, and if the NPC's
+    // own position genuinely isn't advancing — the "wedged in the V
+    // pocket between a tree and a bush" case, since MoveAndSlide() only
+    // reacts to a collision already happening, it doesn't steer around
+    // one — a handful of A* waypoints route it around whatever's in
+    // the way. Once those run out, movement falls straight back to
+    // live direct pursuit (same fallback already used when a
+    // stationary destination has no route at all), and the same
+    // stuck-check keeps watching in case something blocks it again
+    // further along. "travel" is deliberately NOT one of these four:
+    // its whole point is walking toward an unknown path, so it keeps
+    // the original, unconditional straight-line behavior untouched.
+    private const float StuckCheckInterval = 0.3f;
+    private const float StuckProgressFraction = 0.35f; // comfortably under normal cruising displacement, comfortably above the near-zero drift of being wedged against a collider
+    // A FAILED PathGrid.FindPath (genuinely no route exists — an NPC
+    // wedged somewhere truly sealed off from the target) has to
+    // exhaust the whole reachable region before it can conclude that,
+    // unlike a successful search which stops as soon as it reaches the
+    // goal. Retrying that every single StuckCheckInterval while stuck
+    // this way would repeat the single most expensive case on a timer
+    // for however long _unreachableTimeout allows — backing off after
+    // a failure keeps this reactive check cheap in the case it's
+    // actually meant to guard against (a real, nearby obstacle).
+    private const float StuckCheckBackoff = 2f;
+    private float _stuckCheckTimer;
+    private Vector2 _stuckCheckOrigin;
 
     // "flee" walks toward a computed point, not a WorldRegistry entity
     // — there's nothing to look up (see GameAction.Destination's own
@@ -700,6 +759,7 @@ public partial class NPCActor : CharacterBody2D, ICombatant
             _targetNode = null;
             _waypoints = null;
             _waypointIndex = 0;
+            _unreachableTimeout = ComputeUnreachableTimeout(GlobalPosition.DistanceTo(_fleeDestination.Value));
             _state = State.Navigating;
             return;
         }
@@ -723,20 +783,22 @@ public partial class NPCActor : CharacterBody2D, ICombatant
 
         // "travel" is the flagpole case — the path is unknown by
         // design, not a grid-coverage gap, so it always walks straight
-        // at the target. "follow", "trade", "steal", and "attack" all
-        // target something that MOVES (an NPCActor/PlayerCharacter, or
-        // an Animal) — a path computed once at the instant this action
-        // starts would go stale the moment the target takes a step, so
-        // all four always walk straight at wherever the target
-        // currently is too (the same live GlobalPosition read every
-        // physics frame that already makes following work at all).
+        // at the target with no A* involved at all. "follow", "trade",
+        // "steal", and "attack" target something that MOVES — routing
+        // through A* up front would just be routing toward wherever the
+        // target happened to be standing this instant, so they start in
+        // direct-pursuit mode and only fall back on PathGrid reactively,
+        // if it turns out something's actually in the way (see
+        // _stuckCheckTimer's own comment and ProcessNavigating).
         // Everything else is a "known," stationary destination and
-        // routes through A* when a route exists; a null result (no path
-        // found) falls back to the same direct movement.
-        _waypoints = (action.Id == "travel" || action.Id == "follow" || action.Id == "trade" || action.Id == "steal" || action.Id == "attack")
-            ? null
-            : PathGrid.FindPath(GlobalPosition, _targetNode.GlobalPosition);
+        // routes through A* once up front; a null result (no path
+        // found) falls back to direct movement, same as it always has.
+        bool livePathing = action.Id is "follow" or "trade" or "steal" or "attack";
+        _waypoints = (action.Id == "travel" || livePathing) ? null : PathGrid.FindPath(GlobalPosition, _targetNode.GlobalPosition);
         _waypointIndex = 0;
+        _stuckCheckTimer = 0f;
+        _stuckCheckOrigin = GlobalPosition;
+        _unreachableTimeout = ComputeUnreachableTimeout(GlobalPosition.DistanceTo(_targetNode.GlobalPosition));
 
         _state = State.Navigating;
     }
@@ -940,18 +1002,42 @@ public partial class NPCActor : CharacterBody2D, ICombatant
             return;
         }
 
-        if (_elapsed > UnreachableTimeout)
+        if (_elapsed > _unreachableTimeout)
         {
             Velocity = Vector2.Zero;
             Finish(false, "unreachable", new Godot.Collections.Dictionary { { "distance", distToFinal } });
             return;
         }
 
+        // Reactive-only pathing for the four moving-target actions (see
+        // this field's header comment): every StuckCheckInterval,
+        // compare how far the NPC actually moved since the last check
+        // to how far it should have covered at a normal walking pace.
+        // Comfortably short of that is direct pursuit legitimately
+        // making progress (including curving as a moving target shifts
+        // course) — genuinely near-zero is "wedged against something,"
+        // which is when it's actually worth paying for an A* route.
+        if (!_fleeDestination.HasValue && CurrentAction.Id is "follow" or "trade" or "steal" or "attack")
+        {
+            _stuckCheckTimer += delta;
+            if (_stuckCheckTimer >= StuckCheckInterval)
+            {
+                bool stalled = GlobalPosition.DistanceTo(_stuckCheckOrigin) < Speed * StuckCheckInterval * StuckProgressFraction;
+                if (stalled)
+                {
+                    _waypoints = PathGrid.FindPath(GlobalPosition, finalTarget);
+                    _waypointIndex = 0;
+                }
+                _stuckCheckTimer = (stalled && _waypoints == null) ? -StuckCheckBackoff : 0f;
+                _stuckCheckOrigin = GlobalPosition;
+            }
+        }
+
         // Advance through A* waypoints if this action has any (a known
-        // destination the grid found a route for); otherwise walk
-        // straight at the target — the Euclidean-heuristic case, used
-        // for flagpole travel and any known destination the grid
-        // couldn't route to.
+        // destination the grid found a route for, or a reactive reroute
+        // from the stuck-check above); otherwise walk straight at the
+        // target — the Euclidean-heuristic case, used for flagpole
+        // travel and any known destination the grid couldn't route to.
         Vector2 moveTarget = finalTarget;
         if (_waypoints != null && _waypointIndex < _waypoints.Count)
         {
