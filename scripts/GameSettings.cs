@@ -35,4 +35,18 @@ public static class GameSettings
     // wants to see by default, unlike a wolf going after a human (still
     // level 1; see SetChaseOrAttack) or an animal actually dying.
     public static int LogLevel = 1;
+
+    // How many NpcAgent LLM calls LlmRequestQueue lets actually be in
+    // flight against the real backend at once — see its own header for
+    // why this exists at all. 4 is a MEASURED value, not a guess:
+    // confirmed directly against analytics.local (2026-09-08) that 4
+    // truly-concurrent requests at num_ctx=4096 (see MindConfig.NumCtx's
+    // own comment) finish in ~4s total, the same ballpark as one alone
+    // — genuine parallel batching, not serialization — with VRAM
+    // staying flat regardless of how many are in flight. Matches the
+    // "up to 4 NPCs" the game currently targets; if the roster ever
+    // grows past that, re-run the same "fire N concurrent requests, time
+    // the total" test from LlmRequestQueue's own header before raising
+    // this further, rather than assuming it scales for free.
+    public static int MaxConcurrentLlmRequests = 4;
 }

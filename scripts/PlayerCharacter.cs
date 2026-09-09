@@ -80,6 +80,10 @@ public partial class PlayerCharacter : NPCActor, IWorldCharacter
     private GameAction _travelTarget;
     private GameAction _tradeTarget;
     private GameAction _stealTarget;
+    // Which target the current _stealTarget.Item guess was rolled for —
+    // see the steal-guess block's own comment for why this needs to
+    // survive across frames now instead of re-rolling every single one.
+    private string _stealGuessTargetName;
     private GameAction _attackTarget;
     private GameAction _pickUpStickTarget;
     private static readonly GameAction SleepAction = new("sleep", "", 0f);
@@ -112,6 +116,12 @@ public partial class PlayerCharacter : NPCActor, IWorldCharacter
         _uiLog = uiLog;
         _chatInput = chatInput;
         _keys = keys ?? KeyBindings.WasdAndArrows;
+        // Set here, not (also) in Main.tscn — MaxChatMessageChars below
+        // is the one source of truth for this cap; a scene-file property
+        // and a code constant both claiming to be "the" 200 is exactly
+        // the kind of thing that quietly drifts apart the next time
+        // either one gets changed on its own.
+        _chatInput.MaxLength = MaxChatMessageChars;
         _chatInput.TextSubmitted += OnChatSubmitted;
 
         _healthBar = vitalsPanel.GetNode<ProgressBar>("HealthBar");
@@ -430,18 +440,58 @@ public partial class PlayerCharacter : NPCActor, IWorldCharacter
         if (_tradeTarget != null) _tradeButton.Text = $"Give 1 {firstCarried} → {tradeTarget.DisplayName}";
         _tradeButton.Visible = _tradeTarget != null;
 
-        // You don't know what's in someone else's pockets any more than
-        // an NPC does — the button rolls a random guess from
-        // Mind.ItemTypes, the same pool an NPC's own steal tool-call
-        // picks from, re-rolled fresh every panel refresh (this runs
-        // every idle physics frame) so a wrong guess isn't stuck
-        // forever — just walk up and click again for a fresh gamble.
-        // Still not a hint about what they're actually carrying.
+        // Random, but not blind to the point of pointlessness — the
+        // guess is a real item drawn from the target's ACTUAL current
+        // inventory, not a uniform draw across all of Mind.ItemTypes.
+        // The old, uniform version is exactly why an obviously-carried
+        // torch could still fail with "target has none": most of those
+        // 11 categories are usually things the target was never
+        // carrying at all, so a wrong CATEGORY guess (not the genuinely
+        // interesting risk — the contested Dexterity check in
+        // NPCActor's own steal handling) dominated the failure rate.
+        // The button text below deliberately does NOT name the item —
+        // that's still a real guess, not disclosed information; only the
+        // dice determine which of the target's real items gets picked,
+        // and the Dexterity check can still fail —
+        // "you don't know for certain, and it takes real nerve and a
+        // little luck" (see steal's own tool description) stays
+        // completely true, just no longer failing over a category the
+        // target could never plausibly have had.
+        //
+        // Also no longer re-rolls on every single call to this method
+        // (every idle physics frame, a genuine bug — the button text
+        // never showed the guess at all, so the player had no way to
+        // even see, let alone time a click around, what was about to be
+        // attempted). Re-rolls only when the target changes or the
+        // previous guess has gone stale (the target used, traded away,
+        // or otherwise no longer has that specific item) — a fresh
+        // gamble is still always one target-swap or inventory-change
+        // away, just not invisibly happening 60 times a second.
         IWorldCharacter stealTarget = NearestOtherCharacter(ActionRanges.Steal);
-        _stealTarget = stealTarget != null
-            ? new GameAction("steal", stealTarget.DisplayName, ActionRanges.Steal, item: Mind.ItemTypes[Dice.Roll(Mind.ItemTypes.Length) - 1], amount: 1)
-            : null;
-        if (_stealTarget != null) _stealButton.Text = $"Steal from {stealTarget.DisplayName}";
+        Inventory targetInventory = stealTarget switch
+        {
+            NpcAgent agent => agent.Actor.Inventory,
+            NPCActor actor => actor.Inventory, // PlayerCharacter falls here too (PlayerCharacter : NPCActor)
+            _ => null,
+        };
+        var carried = targetInventory != null ? new List<string>(targetInventory.All.Keys) : new List<string>();
+
+        if (stealTarget == null || carried.Count == 0)
+        {
+            _stealTarget = null;
+            _stealGuessTargetName = null;
+        }
+        else
+        {
+            bool stale = _stealGuessTargetName != stealTarget.DisplayName || _stealTarget == null || !carried.Contains(_stealTarget.Item);
+            if (stale)
+            {
+                _stealTarget = new GameAction("steal", stealTarget.DisplayName, ActionRanges.Steal,
+                    item: carried[Dice.Roll(carried.Count) - 1], amount: 1);
+                _stealGuessTargetName = stealTarget.DisplayName;
+            }
+            _stealButton.Text = $"Steal from {stealTarget.DisplayName}";
+        }
         _stealButton.Visible = _stealTarget != null;
 
         Animal attackTarget = NearestAnimal(ActionRanges.Attack);
@@ -743,6 +793,19 @@ public partial class PlayerCharacter : NPCActor, IWorldCharacter
         }
     }
 
+    // The player's own message is guaranteed a spot in every listening
+    // NPC's prompt this turn (see BuildPerception/DecidePlayerRequest —
+    // it's never subject to the same cropping memory/environment/other-
+    // NPCs'-speech are), which only works as a real guarantee if it also
+    // can't be arbitrarily long. This is the one source of truth for
+    // that cap — Initialize() sets ChatInput.MaxLength from this same
+    // constant rather than duplicating the number in Main.tscn, so
+    // there's nothing to drift out of sync. The check below is still a
+    // real backstop, not dead code: MaxLength stops ordinary typing,
+    // but not a future clipboard-paste path or scripted input that
+    // sets .Text directly.
+    private const int MaxChatMessageChars = 200;
+
     private void OnChatSubmitted(string text)
     {
         text = text.Trim();
@@ -750,6 +813,8 @@ public partial class PlayerCharacter : NPCActor, IWorldCharacter
         _chatInput.ReleaseFocus();
         if (text == "")
             return;
+        if (text.Length > MaxChatMessageChars)
+            text = text.Substring(0, MaxChatMessageChars);
 
         // Exactly the same call NpcAgent.OnActionCompleted() makes for
         // "speak" — the player is heard the same way, through the same

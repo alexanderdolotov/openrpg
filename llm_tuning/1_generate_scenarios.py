@@ -140,7 +140,7 @@ def add_request_examples():
     torch_phrasings = ["make yourself a torch", "can you light a torch from the fire?", "turn that stick into a torch"]
     for profile in PROFILES:
         for phrasing in torch_phrasings:
-            targets = base_targets(make_torch_allowed=True, carried_items=["stick"])
+            targets = base_targets(make_torch_allowed=True, light_fire_allowed=False, carried_items=["stick"])
             situation = situation_for(profile, targets, heard=phrasing, inventory={"stick": 1})
             examples.append(make_example(
                 "player_request", f"{persona_line(profile)}\n\n{PLAYER_REQUEST_INSTRUCTION}", situation,
@@ -211,7 +211,7 @@ def add_request_examples():
         ))
 
     for profile in PROFILES:
-        targets = base_targets(cook_meat_allowed=True, carried_items=["rabbit_meat"])
+        targets = base_targets(cook_meat_allowed=True, light_fire_allowed=False, carried_items=["rabbit_meat"])
         situation = situation_for(profile, targets, heard="can you cook that meat?", inventory={"rabbit_meat": 1})
         examples.append(make_example(
             "player_request", f"{persona_line(profile)}\n\n{PLAYER_REQUEST_INSTRUCTION}", situation,
@@ -266,6 +266,147 @@ def add_decline_examples():
             tags=["decline", "not_available", "pick_up_stick"],
         ))
 
+    # pick_apple/catch_fish joined the same enum-of-nothing gating as
+    # pick_up_stick/make_torch above once TreeIds/FishingSpotIds became
+    # vision-filtered (NpcAgent.SortByDistance, 2026-09-08) instead of
+    # "exists anywhere on the map" — these two are the direct test of
+    # that change: no apple tree/fishing spot in tree_ids/fishing_spot_ids
+    # (and none described in resource_lines, so the situation text and
+    # the tool menu stay honest with each other) should decline the same
+    # honest way an unlit fire pit or a missing stick already does.
+    for profile in PROFILES:
+        targets = base_targets(tree_ids=[])
+        situation = situation_for(profile, targets, heard="let's go pick some apples", inventory={}, extra_resource_lines=[])
+        examples.append(make_example(
+            "player_request", f"{persona_line(profile)}\n\n{PLAYER_REQUEST_INSTRUCTION}", situation,
+            build_tools(targets),
+            {"name": "speak", "arguments": {"message": "I don't see any apple trees near me right now.", "emotion": "neutral"}},
+            tags=["decline", "not_available", "pick_apple"],
+        ))
+
+    for profile in PROFILES:
+        targets = base_targets(fishing_spot_ids=[])
+        situation = situation_for(profile, targets, heard="let's go fishing", inventory={}, extra_resource_lines=[])
+        examples.append(make_example(
+            "player_request", f"{persona_line(profile)}\n\n{PLAYER_REQUEST_INSTRUCTION}", situation,
+            build_tools(targets),
+            {"name": "speak", "arguments": {"message": "There's no water anywhere near me right now.", "emotion": "neutral"}},
+            tags=["decline", "not_available", "catch_fish"],
+        ))
+
+    # gather_pinecone: base_targets() defaults pine_tree_ids to ["pine_0"]
+    # but situation_for's own default resource_lines never mentions a pine
+    # tree to begin with (only tree_0/berry_0) — pine_tree_ids=[] alone
+    # keeps situation text and tool menu honest with each other here, no
+    # extra_resource_lines override needed.
+    for profile in PROFILES:
+        targets = base_targets(pine_tree_ids=[])
+        situation = situation_for(profile, targets, heard="let's go get some pinecones", inventory={})
+        examples.append(make_example(
+            "player_request", f"{persona_line(profile)}\n\n{PLAYER_REQUEST_INSTRUCTION}", situation,
+            build_tools(targets),
+            {"name": "speak", "arguments": {"message": "I don't see any pine trees near me right now.", "emotion": "neutral"}},
+            tags=["decline", "not_available", "gather_pinecone"],
+        ))
+
+    # gather_berry: berry_0 IS in the default resource_lines, so this one
+    # needs the override (keeping the apple tree line, dropping berry's).
+    for profile in PROFILES:
+        targets = base_targets(berry_bush_ids=[])
+        situation = situation_for(profile, targets, heard="go pick some berries", inventory={},
+                                   extra_resource_lines=["tree_0 (apple tree): 140 px away, 3 apples ready to pick."])
+        examples.append(make_example(
+            "player_request", f"{persona_line(profile)}\n\n{PLAYER_REQUEST_INSTRUCTION}", situation,
+            build_tools(targets),
+            {"name": "speak", "arguments": {"message": "I don't see any berry bushes near me right now.", "emotion": "neutral"}},
+            tags=["decline", "not_available", "gather_berry"],
+        ))
+
+    # cook_meat: fire IS lit (so this isn't confusable with make_torch's
+    # "fire unlit" reason above) but nothing raw to cook — the OTHER half
+    # of cook_meat_allowed's two-part gate (FirePit.IsLit && Has(rabbit_meat)).
+    for profile in PROFILES:
+        targets = base_targets(make_torch_allowed=True, light_fire_allowed=False)  # fire lit; no rabbit_meat in carried_items below
+        situation = situation_for(profile, targets, heard="can you cook up some meat?", inventory={})
+        examples.append(make_example(
+            "player_request", f"{persona_line(profile)}\n\n{PLAYER_REQUEST_INSTRUCTION}", situation,
+            build_tools(targets),
+            {"name": "speak", "arguments": {"message": "I don't have any raw meat to cook right now.", "emotion": "neutral"}},
+            tags=["decline", "not_available", "cook_meat"],
+        ))
+
+    # light_fire: the INVERSE of make_torch's unlit case above — fire is
+    # already burning, so light_fire itself drops out of the menu (Mind.
+    # BuildTools only offers it while LightFireAllowed, i.e. !IsLit).
+    for profile in PROFILES:
+        targets = base_targets(make_torch_allowed=True, light_fire_allowed=False)  # fire lit -> firepit_lit=True in situation_for, light_fire not offered
+        situation = situation_for(profile, targets, heard="light the fire, would you?", inventory={})
+        examples.append(make_example(
+            "player_request", f"{persona_line(profile)}\n\n{PLAYER_REQUEST_INSTRUCTION}", situation,
+            build_tools(targets),
+            {"name": "speak", "arguments": {"message": "It's already burning — no need.", "emotion": "neutral"}},
+            tags=["decline", "not_available", "light_fire"],
+        ))
+
+    # trade: base_targets() already defaults carried_items=[] (nothing to
+    # give), so the ordinary default targets already exercise this — the
+    # only change needed is the heard line and an in-character decline.
+    for profile in PROFILES:
+        targets = base_targets()
+        situation = situation_for(profile, targets, heard="can I have an apple?", inventory={})
+        examples.append(make_example(
+            "player_request", f"{persona_line(profile)}\n\n{PLAYER_REQUEST_INSTRUCTION}", situation,
+            build_tools(targets),
+            {"name": "speak", "arguments": {"message": "I don't have any apples on me to give you.", "emotion": "neutral"}},
+            tags=["decline", "not_available", "trade"],
+        ))
+
+    # attack: base_targets() already defaults animal_ids=[] — same "ordinary
+    # default already covers this" shape as trade above.
+    for profile in PROFILES:
+        targets = base_targets()
+        situation = situation_for(profile, targets, heard="there's a bear, get it!", inventory={})
+        examples.append(make_example(
+            "player_request", f"{persona_line(profile)}\n\n{PLAYER_REQUEST_INSTRUCTION}", situation,
+            build_tools(targets),
+            {"name": "speak", "arguments": {"message": "I don't see anything to fight right now.", "emotion": "neutral"}},
+            tags=["decline", "not_available", "attack"],
+        ))
+
+    # sleep: not offered while well above NPCActor.CanSleep's own
+    # "unnecessary" threshold — a real "can't" distinct from the mountains
+    # example below, which is a genuine "won't" (too worn out to travel,
+    # not too rested to sleep).
+    for profile in PROFILES:
+        targets = base_targets(sleep_allowed=False)
+        situation = situation_for(profile, targets, heard="you should get some rest", inventory={}, vitals=(90.0, 90.0, 70.0))
+        examples.append(make_example(
+            "player_request", f"{persona_line(profile)}\n\n{PLAYER_REQUEST_INSTRUCTION}", situation,
+            build_tools(targets),
+            {"name": "speak", "arguments": {"message": "I'm not tired enough for that right now.", "emotion": "neutral"}},
+            tags=["decline", "not_available", "sleep"],
+        ))
+
+    # --- Compound QUESTION + REQUEST in one line — the exact ambiguity
+    # PLAYER_REQUEST_INSTRUCTION's binary framing doesn't cover on its own:
+    # only ONE tool call happens this turn, so a line carrying both a real
+    # question and a real request has to pick one. REQUEST wins here —
+    # the actionable half is genuinely time-sensitive (the moment passes),
+    # the factual half isn't (it's still just as true and askable next
+    # turn) — same "answer this" priority PLAYER_REQUEST_INSTRUCTION
+    # already gives a bare request over a bare question when both compete
+    # for the single tool call.
+    for profile in PROFILES:
+        targets = base_targets(pine_tree_ids=["pine_0"])
+        situation = situation_for(profile, targets, heard="how many apples do you have? let's go collect some pinecones",
+                                   inventory={"apple": 2})
+        examples.append(make_example(
+            "player_request", f"{persona_line(profile)}\n\n{PLAYER_REQUEST_INSTRUCTION}", situation,
+            build_tools(targets),
+            {"name": "gather_pinecone", "arguments": {"target_id": "pine_0", "emotion": "neutral"}},
+            tags=["request", "compound_reasoning", "gather_pinecone"],
+        ))
+
     wren = PROFILES[2]
     targets = base_targets(travel_target_ids=["misty_mountains"])
     situation = situation_for(wren, targets, heard="want to go check out the mountains?", inventory={}, vitals=(90.0, 20.0, 70.0))
@@ -315,7 +456,7 @@ def add_ambient_examples():
         ))
 
     for profile in PROFILES:
-        targets = base_targets(make_torch_allowed=True, carried_items=["stick"])
+        targets = base_targets(make_torch_allowed=True, light_fire_allowed=False, carried_items=["stick"])
         examples.append(ambient_example(
             profile, targets, inventory={"stick": 1}, vitals=(90.0, 70.0, 70.0),
             plan="The fire's burning and I've got a stick — good time to make myself a torch.",

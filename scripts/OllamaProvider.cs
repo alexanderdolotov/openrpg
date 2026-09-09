@@ -19,7 +19,7 @@ public partial class OllamaProvider : Node, ILlmProvider
     // 4096 on analytics.local, nothing to do with what the model can
     // actually handle), and silently truncates the front of any prompt
     // that exceeds it rather than erroring.
-    public int NumCtx = 8192;
+    public int NumCtx = 4096;
 
     private HttpRequest _request;
 
@@ -29,7 +29,14 @@ public partial class OllamaProvider : Node, ILlmProvider
         AddChild(_request);
     }
 
-    public async Task<ChatResult> Chat(object[] messages, object[] tools, float temperature = 0.7f)
+    // Gated through LlmRequestQueue rather than firing straight at
+    // _request — see its own header for why (VRAM is fine under
+    // concurrent load, wall-clock latency is not). The actual HTTP work
+    // is unchanged, just no longer callable outside the shared queue.
+    public Task<ChatResult> Chat(object[] messages, object[] tools, float temperature = 0.7f) =>
+        LlmRequestQueue.Enqueue(() => ChatInternal(messages, tools, temperature));
+
+    private async Task<ChatResult> ChatInternal(object[] messages, object[] tools, float temperature)
     {
         var bodyObj = new System.Collections.Generic.Dictionary<string, object>
         {

@@ -43,8 +43,20 @@ public class Mind
     // so the same instruction serves any NPC's personality.
     private const string ThinkInstruction =
         "Given the situation below, write ONE short, plain sentence (under 15 words) of what you're actually thinking right now. Talk like a real person thinking to themselves, not a novelist — no metaphors, no describing the scenery, no flowery language. If your last action failed, especially more than once, say so plainly and react to it. If the situation shows someone just said something to you — especially a direct request, like asking you to follow them or help with something — that's the single most important thing to react to right now, above anything else going on: think about THAT, specifically (agreeing, refusing, or being unsure are all real reactions — silently ignoring it and thinking about something else entirely is not, unless something more urgent is actively happening to you). Just the plain thought, nothing else.";
+    // Rewritten clean/minimal, 2026-09-08 — the dense, exhaustively-
+    // reasoned paragraph this used to be (every tool explained at
+    // length, edge cases spelled out inline) is preserved in git
+    // history. llm_tuning's baseline eval (live against Ollama, not
+    // simulated) measured this model doing BETTER on the tool-confusion
+    // it was originally trying to prevent (pick_apple vs
+    // gather_pinecone) once the prose shrank and BuildTools' own
+    // conditional gating (see its own comments) started doing more of
+    // the actual constraining — a long instruction can't out-argue a
+    // tool that simply isn't in the list. See llm_tuning/common.py's
+    // ACT_INSTRUCTION (the version actually benchmarked) — port any
+    // future change there too, in the same commit.
     private const string ActInstruction =
-        "Call exactly one of the provided tools that matches the plan below. If you were already in the middle of something — following someone, traveling somewhere, working toward a goal you'd set for yourself — lean toward sticking with it for a while rather than switching every single turn just because you technically can; a goal worth having is worth a bit of follow-through. Only actually change course when it's genuinely finished, clearly not working out, or something that actually matters more just happened — a real reason, not a passing whim. (This call is never even reached while something dangerous — a wolf or bear actively coming for you — is happening; see DecideThreatResponse below for that entirely separate, narrower decision.) If your last action failed — especially if it failed more than once in a row for the same reason — do not just repeat it; pick something that actually addresses why it failed (e.g. deposit before trying to pick or catch again, or choose a different target if one is depleted). travel is a valid choice on its own, out of curiosity, even toward somewhere you've never been and don't know the way to — you don't need a resource-gathering reason to go look at something. speak lets you say something out loud in your own words — anyone within hearing range right now may hear it and decide how to react on their own later, including being persuaded, won over, or talked into something if what you say actually lands with them; it does not control or compel anyone, and if nobody's around, nobody hears it, which is a perfectly normal outcome of speaking. follow lets you walk alongside someone nearby by name — a genuine choice you make (or don't) based on your own read of them and what's been said, not something anyone can force; re-decide it fresh every turn just like anything else, which means choosing follow AGAIN, turn after turn, is what actually keeps you with them — arriving next to them once doesn't mean you're done, they may well walk on right after, and only choosing something else is what actually stops you following. If another character (not the player) just directly asked you to follow them or help with something, that request is the main thing to weigh right now — follow (if you're actually persuaded) or speak (to say yes, no, or ask something back) are both real, direct responses to it; picking something completely unrelated, like gathering, is turning them down without saying so, which is a worse look than an honest no. (A direct ask from the real human player never actually reaches this decision at all — it's answered separately, immediately, the turn it's heard; see DecidePlayerRequest.) trade gives someone nearby an item you're actually carrying — a real choice about generosity or self-interest, entirely up to you. steal takes an item from someone nearby without asking and without them agreeing to it — you don't know for certain what they're carrying, only a guess, it takes real nerve and a little luck (you can simply fail even if they do have it), and it's not hidden from them forever, since anyone keeps their own count of what they're carrying and can notice later that something's missing. sleep rests where you are and fully restores your fatigue (and health), but takes a while — worth doing once you're actually tired, not as a routine choice, and pay attention to your own fatigue level below: if you're exhausted, that's a real, physical reason to sleep before doing anything else, or to turn down something demanding (a long trip, more gathering) rather than push through it — nobody is forcing that consideration on you, it's just true of your own body right now. eat restores health and hunger from something you're already carrying — but pay attention to your health and hunger levels below even when eat ISN'T offered yet: if either is getting low and you're not carrying any food, that's a real, physical reason to go gather something you can actually eat (an apple, a fish, or a berry — a pinecone doesn't count, it's not food) before continuing with whatever else you were doing, the same way low fatigue is a real reason to go sleep. pick_up_stick is worth doing any time you notice one lying around, not just when you're already thinking about a fight — it's a real upgrade over bare hands, cheap to grab in passing. attack isn't only self-defense — hunting a wild animal (a rabbit, for its meat and fur) is a completely ordinary thing to go do on your own initiative when you want food or have nothing better in mind, the same as choosing to gather fruit or catch a fish; you don't need to already be in danger to pick it as your goal for the turn. light_fire (lighting the fire pit near home) and, once it's burning, make_torch (turning a stick you're carrying into a real personal light source) and cook_meat (turning raw rabbit meat — not edible on its own — into cooked meat, the single most filling food there is) are all genuinely worthwhile things to go do, not just emergency tools: tending the fire, making yourself a torch, or cooking up what you hunted are all perfectly normal reasons to head home for a while. Set emotion to how you're genuinely feeling, reacting to what just happened as much as your personality — frustration or disappointment after a repeated failure, satisfaction after a success, not a fixed mood. Only ever target an id that is explicitly listed in the situation — never invent one that isn't there. Choose whichever tool actually fits who you are and what you want right now — nothing assigns you a role.";
+        "Call exactly one of the tools listed below — whichever one best fits your personality, stats, and the situation above right now. If your last action just failed, don't repeat it — pick something that addresses why. Only target an id that's explicitly listed above; never invent one.";
     // A completely separate, deliberately narrow instruction from
     // ActInstruction above — "the LLM can't choose to go pick berries
     // while a wolf is attacking them." Only ever used by
@@ -71,21 +83,21 @@ public class Mind
     // needs the real catch_fish/pick_apple/travel/follow/... tool, not
     // a synthetic yes/no with no way to say WHAT you're agreeing to).
     // What's different is skipping the normal think-then-act split
-    // (Decide() above) and swapping in this much more insistent
-    // instruction on its own — ActInstruction already asks, at length,
-    // for a direct reply to the player, but that's one soft nudge
-    // sitting alongside fourteen tools a small model is just as free to
-    // reach for instead, and in practice (see the thought log) it does:
-    // "thinking about" a direct request for several turns running
-    // without ever actually acting on it, because gathering or
-    // wandering off kept winning the vote. Called only for the one
-    // turn the player is actually waiting on an answer (see
-    // NpcAgent.HandleDirectPlayerRequest) — narrowing the INSTRUCTION
-    // rather than the tool list is what keeps "yes, let's fish" and
-    // "no thanks" both genuinely available without reopening the door
-    // to the drift this exists to close off.
+    // (Decide() above) and swapping in this instruction on its own,
+    // called only for the one turn the player is actually waiting on an
+    // answer (see NpcAgent.HandleDirectPlayerRequest).
+    //
+    // Rewritten clean/minimal, 2026-09-08 — same reasoning as
+    // ActInstruction's own header just above: the original ran to
+    // ~3.5KB of exhaustively-reasoned prose (every hedge/musing/dodge
+    // pattern spelled out at length), preserved in git history.
+    // llm_tuning's baseline eval measured no real regression from
+    // shrinking it — see llm_tuning/common.py's PLAYER_REQUEST_INSTRUCTION
+    // (the version actually benchmarked, including the "come with me"
+    // follow-phrasing clause and the compound question+request rule
+    // below) — port any future change there too, in the same commit.
     private const string PlayerRequestInstruction =
-        "The real human player — not another character in this world — just said something to you directly, described in the situation below. Your only job this turn is to answer them, right now, with a real tool call. First figure out which of two things this actually is: a QUESTION, or a REQUEST to do something. If they asked a question — about you, what you're carrying, your stats, your condition, where you are, what you're doing, anything you'd genuinely know the answer to — call speak and give the real, specific answer, using the actual information already provided to you below (your inventory, your natural abilities, your physical condition, your location) — an exact count or fact if you have one (\"I have 3 apples\"), not a vague deflection, a change of subject, or an unrelated action like follow/travel/wait; if you truly don't know or don't have whatever they're asking about, say THAT plainly (\"I don't have any\"), which is still a real, honest answer. If instead they're asking you to DO something, decide whether you're going along with it: call whichever single tool actually matches it — follow to walk with them, catch_fish/pick_apple/gather_pinecone/gather_berry to do the activity they proposed together, travel if they're inviting you somewhere, trade if they asked for an item, attack if they want help fighting something, pick_up_stick if they're pointing one out, light_fire if they want the fire pit lit (it needs nothing else at all — no stick, no fuel, nothing in your inventory, just walk up and light it, so don't stall on 'checking if it needs fuel first' or anything like that — that isn't a real requirement), make_torch if they want you to turn a stick you're carrying into a torch, cook_meat if they want raw meat cooked, or whatever else genuinely fits what they said — and actually call that tool THIS turn if you're going along with it, not just say you will and leave the real action for later; agreeing out loud without ever calling the matching tool is the same as not helping at all. Musing about it out loud is the same problem wearing a softer voice — 'maybe I could try that' or 'I'm not sure, but I do have what I'd need' is still not a decision, just a decision-shaped sentence; if you're leaning toward yes, commit and call the tool, don't describe yourself almost doing it. If you're not going along with it or you're genuinely unsure, call speak and say so directly and PLAINLY, in your own words — a clear 'no' or 'I don't know' — not a hedge that quietly implies yes while technically committing to nothing. Weigh it honestly against your personality and whatever else is going on, same as any other choice, but reaching for something UNRELATED to what they actually said or asked — gathering on your own, wandering off, waiting, following someone when they asked a question, or repeatedly talking ABOUT helping without ever calling the tool that actually does it — is not a real option right now: that's dodging, not answering, and a worse look than an honest no or \"I don't know.\"";
+        "The player just spoke to you directly — see HEARD above. Answer them this turn with a real tool call, not just words. If it's a question, call speak with the honest, specific answer from what's listed above. If it's a request to do something, call the one matching tool right now if you're willing — including a casual \"come with me\"/\"walk with me\"/\"stay with me\" (that's follow, even without the word \"follow\" in it) — or call speak to say no, plainly, if you're not willing, or if the tool for it isn't listed below at all right now. If they said both a question AND a request in the same line, answer the request — it's the time-sensitive half; the fact they asked about is still just as true and still answerable next time they ask.";
 
     private const string SummarizeSystemPrompt =
         "You are compressing an NPC's memory log into a short diary paragraph (3-5 sentences) they'll carry forward. Preserve what matters for future decisions — where they've been, what they've done, anything notable, and anything said aloud (by them or heard from someone else), including who said or asked for what by name. A repeated identical failure is NOT routine detail — it's the opposite: state plainly what failed, why, and how many times, so it isn't attempted again pointlessly. Drop only genuinely routine, non-repeated detail (a single successful wait, a normal walk). Write in first person, past tense.";
@@ -96,10 +108,12 @@ public class Mind
     // both need a fixed, enumerable answer to "which item" for the tool
     // schema. Grows the day a new resource type does, same as
     // ActionRanges already does per-action. Internal, not private —
-    // PlayerCharacter's own steal button rolls its blind guess from
-    // this exact same list, so a human player is guessing from the
-    // same pool an NPC's steal tool-call enum offers, not a
-    // hand-picked subset.
+    // referenced elsewhere for the same "which item" question, though
+    // PlayerCharacter's own steal button no longer rolls uniformly from
+    // this full list (see its own comment): it draws from the target's
+    // actual carried items instead, so a wrong-category guess can't
+    // fail a steal against someone who was never carrying that item to
+    // begin with.
     public static readonly string[] ItemTypes = { "apple", "fish", "pinecone", "blueberry", "blackberry", "raspberry", "stick", "rabbit_meat", "fur", "torch", "cooked_meat" };
 
     private readonly ILlmProvider _provider;
@@ -167,9 +181,9 @@ public class Mind
         public static MindResult Success(string thought, GameAction action) => new(true, null, thought, action);
     }
 
-    public async Task<MindResult> Decide(string perceptionText, AvailableTargets targets, Personality personality)
+    public async Task<MindResult> Decide(string perceptionText, AvailableTargets targets, Personality personality, string statsLine)
     {
-        string persona = personality.DescribeForPrompt();
+        string persona = $"{personality.DescribeForPrompt()}\nSTATS: {statsLine}";
         float temperature = personality.Temperature;
 
         var thinkMessages = new object[]
@@ -297,9 +311,9 @@ public class Mind
     // Same bounded-retry posture as Decide()'s own act call — a
     // malformed or off-menu tool call is one retry before giving up on
     // the turn, not a hard failure.
-    public async Task<MindResult> DecidePlayerRequest(string perceptionText, AvailableTargets targets, Personality personality)
+    public async Task<MindResult> DecidePlayerRequest(string perceptionText, AvailableTargets targets, Personality personality, string statsLine)
     {
-        string persona = personality.DescribeForPrompt();
+        string persona = $"{personality.DescribeForPrompt()}\nSTATS: {statsLine}";
         float temperature = personality.Temperature;
 
         var messages = new object[]
@@ -373,6 +387,19 @@ public class Mind
     // "no exceptions to lean on" posture as Decide(): if the compression
     // call itself fails, fall back to a naive truncation rather than
     // lose the memory or crash — a worse summary is better than none.
+    // SummarizeSystemPrompt only ASKS for "3-5 sentences" — a soft
+    // instruction the real logs showed a small model doesn't always
+    // honor (some compressed diary paragraphs ran well past that). Since
+    // Diary feeds straight into every future prompt's fixed-ish overhead
+    // (see MindConfig.NumCtx's own comment on the context-window budget),
+    // an occasional overlong summary isn't just untidy, it's exactly the
+    // kind of slow, unbounded growth that eventually crowds out the
+    // actual situation and any direct request in it. A hard backstop
+    // here, same "keep the most recent tail" shape as TruncateFallback
+    // below, closes that gap regardless of how well any given
+    // summarization call behaves.
+    private const int MaxDiaryChars = 800;
+
     public async Task<string> Summarize(string existingDiary, string rawLog)
     {
         string prompt = string.IsNullOrEmpty(existingDiary)
@@ -390,14 +417,30 @@ public class Mind
             return TruncateFallback(existingDiary, rawLog);
 
         string summary = (result.Message.Content ?? "").Trim();
-        return string.IsNullOrEmpty(summary) ? TruncateFallback(existingDiary, rawLog) : summary;
+        if (string.IsNullOrEmpty(summary))
+            return TruncateFallback(existingDiary, rawLog);
+        return summary.Length > MaxDiaryChars ? "..." + TrimToTail(summary, MaxDiaryChars) : summary;
     }
 
     private static string TruncateFallback(string existingDiary, string rawLog)
     {
         string combined = string.IsNullOrEmpty(existingDiary) ? rawLog : $"{existingDiary} {rawLog}";
         const int keep = 400;
-        return combined.Length > keep ? "..." + combined.Substring(combined.Length - keep) : combined;
+        return combined.Length > keep ? "..." + TrimToTail(combined, keep) : combined;
+    }
+
+    // A plain Substring(s.Length - maxChars) can land exactly on the
+    // low half of a surrogate pair (an emoji, some CJK extension
+    // characters — rare from a local LLM's English output, but not
+    // impossible) and hand back a lone, invalid surrogate at the start
+    // of the result. Nudging the cut forward one more character when
+    // that happens keeps the tail on a real character boundary instead.
+    private static string TrimToTail(string s, int maxChars)
+    {
+        int start = s.Length - maxChars;
+        if (start > 0 && char.IsLowSurrogate(s[start]))
+            start++;
+        return s.Substring(start);
     }
 
     private readonly struct ParseResult
@@ -853,44 +896,6 @@ public class Mind
                 type = "function",
                 function = new
                 {
-                    name = "pick_apple",
-                    description = "Walk to an apple tree and pick an apple from it.",
-                    parameters = new
-                    {
-                        type = "object",
-                        properties = new
-                        {
-                            target_id = new { type = "string", @enum = targets.TreeIds, description = "which tree to pick from" },
-                            emotion = new { type = "string", @enum = EmotionExtensions.AllValues, description = "how you're feeling right now" },
-                        },
-                        required = new[] { "target_id", "emotion" },
-                    },
-                },
-            },
-            new
-            {
-                type = "function",
-                function = new
-                {
-                    name = "catch_fish",
-                    description = "Walk to a spot along the river and try to catch a fish there.",
-                    parameters = new
-                    {
-                        type = "object",
-                        properties = new
-                        {
-                            target_id = new { type = "string", @enum = targets.FishingSpotIds, description = "which fishing spot to try" },
-                            emotion = new { type = "string", @enum = EmotionExtensions.AllValues, description = "how you're feeling right now" },
-                        },
-                        required = new[] { "target_id", "emotion" },
-                    },
-                },
-            },
-            new
-            {
-                type = "function",
-                function = new
-                {
                     name = "deposit",
                     description = "Walk home and deposit everything you're currently carrying, whatever the mix of items.",
                     parameters = new
@@ -972,13 +977,67 @@ public class Mind
             });
         }
 
+        // pick_apple/catch_fish used to sit unconditionally in the base
+        // tools list above — "hand-placed and guaranteed to exist from
+        // the start," so the enum could never be empty. That guarantee
+        // covered EXISTENCE, not PROXIMITY: TreeIds/FishingSpotIds are
+        // vision-filtered now (see NpcAgent.SortByDistance's own header
+        // — llm_tuning's baseline eval, 2026-09-08, measured pick_apple
+        // recall collapsing to 8.3% specifically because it was offered
+        // every turn regardless of whether an apple tree was anywhere
+        // in sight), so the enum genuinely can be empty now — same
+        // enum-of-nothing guard every other resource tool already
+        // needed, just newly true for these two as well.
+        if (targets.TreeIds.Length > 0)
+        {
+            tools.Add(new
+            {
+                type = "function",
+                function = new
+                {
+                    name = "pick_apple",
+                    description = "Walk to an apple tree and pick an apple from it.",
+                    parameters = new
+                    {
+                        type = "object",
+                        properties = new
+                        {
+                            target_id = new { type = "string", @enum = targets.TreeIds, description = "which tree to pick from" },
+                            emotion = new { type = "string", @enum = EmotionExtensions.AllValues, description = "how you're feeling right now" },
+                        },
+                        required = new[] { "target_id", "emotion" },
+                    },
+                },
+            });
+        }
+
+        if (targets.FishingSpotIds.Length > 0)
+        {
+            tools.Add(new
+            {
+                type = "function",
+                function = new
+                {
+                    name = "catch_fish",
+                    description = "Walk to a spot along the river and try to catch a fish there.",
+                    parameters = new
+                    {
+                        type = "object",
+                        properties = new
+                        {
+                            target_id = new { type = "string", @enum = targets.FishingSpotIds, description = "which fishing spot to try" },
+                            emotion = new { type = "string", @enum = EmotionExtensions.AllValues, description = "how you're feeling right now" },
+                        },
+                        required = new[] { "target_id", "emotion" },
+                    },
+                },
+            });
+        }
+
         // Only offered when there's actually a pine tree to gather
         // from — an enum-of-nothing tool can never be called validly,
-        // so omit it rather than offer a dead option. Unlike pick_apple/
-        // catch_fish (hand-placed and guaranteed to exist from the
-        // start), pine trees can be purely exploration-generated in
-        // principle, so this can't assume the enum is never empty the
-        // way those two do.
+        // so omit it rather than offer a dead option. Same reasoning
+        // pick_apple/catch_fish above now need too.
         if (targets.PineTreeIds.Length > 0)
         {
             tools.Add(new

@@ -217,7 +217,25 @@ public partial class NpcAgent : Node, IWorldCharacter
         // right in the main perception body — not buried in the diary —
         // is what actually gives a small model a real shot at
         // responding to it.
+        // RecentEventBuffer.Consume() (what both SpeechLog.Overheard and
+        // WorldEventLog.Witnessed below actually call) hands back EVERY
+        // matching entry from up to 30 real seconds ago that this
+        // listener hasn't already consumed — genuinely unbounded in
+        // count if this NPC's own turn gets delayed (a long action, slow
+        // LLM latency) while several others keep talking/acting nearby.
+        // A direct line from the real player must never be cropped for
+        // this (see PLAYER_REQUEST_INSTRUCTION/ActInstruction — it's the
+        // single most important thing to react to this turn), but other
+        // NPCs' small talk competes for the same budget as memory/
+        // environment objects and gets capped the same way: most-recent-
+        // first, oldest excess dropped. Raw logging (_uiLog/Memory.Record/
+        // _thoughtLog.Log) stays uncapped below regardless — this only
+        // caps what actually goes into THIS turn's prompt.
+        const int MaxFreshHeardLines = 6;
+        const int MaxFreshWitnessedLines = 6;
+
         var freshHeard = new List<string>();
+        var nonPlayerHeardLines = new List<string>();
         // Captured alongside freshHeard below, not derived from it —
         // used right after this loop to route straight into a guaranteed
         // direct answer (see HandleDirectPlayerRequest) instead of
@@ -245,8 +263,13 @@ public partial class NpcAgent : Node, IWorldCharacter
             _uiLog($"[{Personality.Name}] heard {speakerName} say: \"{message}\"{hint}", "c9a9e8");
             Memory.Record("heard", $"{speakerName} said: \"{message}\"{hint}");
             _thoughtLog.Log(Personality.Name, "HEARD", $"{speakerName}: {message}{hint}");
-            freshHeard.Add($"{speakerName}{speakerNote} just said to you: \"{message}\"{hint}");
+            string line = $"{speakerName}{speakerNote} just said to you: \"{message}\"{hint}";
+            if (fromPlayer)
+                freshHeard.Add(line); // never capped
+            else
+                nonPlayerHeardLines.Add(line);
         }
+        freshHeard = CapHeardLines(freshHeard, nonPlayerHeardLines, MaxFreshHeardLines);
 
         // Same "delivered once, written to Memory" treatment as heard
         // speech just above — whatever else happened nearby since this
@@ -268,6 +291,7 @@ public partial class NpcAgent : Node, IWorldCharacter
             Memory.Record("witnessed", description);
             freshWitnessed.Add($"You just saw: {description}");
         }
+        freshWitnessed = CapToMostRecent(freshWitnessed, MaxFreshWitnessedLines);
 
         string perception = BuildPerception(freshHeard, freshWitnessed);
 
@@ -409,7 +433,7 @@ public partial class NpcAgent : Node, IWorldCharacter
             }
         }
 
-        var result = await Mind.Decide(perception, targets, Personality);
+        var result = await Mind.Decide(perception, targets, Personality, Actor.Stats.Describe());
         _thinking = false;
 
         if (!result.Ok && _pureLlmMode && !IsToolCallFailure(result.Error))
@@ -501,7 +525,7 @@ public partial class NpcAgent : Node, IWorldCharacter
     // needs to outlast this single turn.
     private async Task HandleDirectPlayerRequest(string playerName, string playerMessage, string perception, Mind.AvailableTargets targets)
     {
-        Mind.MindResult result = await Mind.DecidePlayerRequest(perception, targets, Personality);
+        Mind.MindResult result = await Mind.DecidePlayerRequest(perception, targets, Personality, Actor.Stats.Describe());
         _thinking = false;
 
         if (!result.Ok && _pureLlmMode && !IsToolCallFailure(result.Error))
@@ -673,15 +697,39 @@ public partial class NpcAgent : Node, IWorldCharacter
     // call (cheap: at most a few dozen items) is what keeps "nearest"
     // actually meaning nearest right now instead of nearest as of
     // whenever the cache last rebuilt.
+    // Nearest-first among only what's actually within sight right now
+    // (SpatialMemory.VisionRadius) — this used to be nearest-first
+    // among EVERY instance anywhere on the map, full stop, an
+    // intentional "you know roughly where to go looking" allowance so
+    // gather_berry/pick_up_stick stayed reachable sight-unseen (see
+    // NearestResourceLines' own header for that original reasoning,
+    // which this method deliberately no longer follows). Reversed
+    // after llm_tuning's baseline eval (2026-09-08) measured pick_apple
+    // recall collapsing to 8.3% under exactly that allowance: pick_apple
+    // and catch_fish were unconditionally offered every single turn
+    // regardless of whether an apple tree or fishing spot was anywhere
+    // near this NPC, so the model had no environmental signal at all to
+    // distinguish "genuinely relevant right now" from "technically
+    // exists somewhere on a large, ever-growing map" — same failure
+    // shape as offering catch_fish to an NPC standing in a forest with
+    // no river in sight. An empty result now correctly makes BuildTools
+    // omit the tool entirely (see its own gating, matching the
+    // enum-of-nothing guard gather_pinecone/gather_berry already had) —
+    // "genuinely not available right now" is what PlayerRequestInstruction's
+    // can't-vs-won't guidance is for, not something this list should
+    // paper over by staying unbounded. A player's own words can still
+    // ask for something out of sight; that's a distinct, honest
+    // "unavailable" answer, not a reason to keep the ambient enum
+    // pretending it's always in reach.
     private string[] SortByDistance<T>(string[] ids, IReadOnlyList<T> objects, Func<T, Vector2> position) where T : Node2D
     {
         Vector2 origin = Actor.GlobalPosition;
-        int[] order = Enumerable.Range(0, ids.Length).ToArray();
-        Array.Sort(order, (a, b) => origin.DistanceTo(position(objects[a])).CompareTo(origin.DistanceTo(position(objects[b]))));
-        var sorted = new string[ids.Length];
-        for (int i = 0; i < order.Length; i++)
-            sorted[i] = ids[order[i]];
-        return sorted;
+        return Enumerable.Range(0, ids.Length)
+            .Select(i => (id: ids[i], dist: origin.DistanceTo(position(objects[i]))))
+            .Where(t => t.dist <= SpatialMemory.VisionRadius)
+            .OrderBy(t => t.dist)
+            .Select(t => t.id)
+            .ToArray();
     }
 
     private string[] _treeIds;
@@ -1229,56 +1277,200 @@ public partial class NpcAgent : Node, IWorldCharacter
             yield return (kv.Key, kv.Value.GlobalPosition);
     }
 
+    // Every candidate environment line carries its own distance now, not
+    // just formatted text — MergeGuaranteedDiversityThenNearest below
+    // needs the real number back to do a genuine GLOBAL nearest-first
+    // fill across categories once diversity is satisfied, not just a
+    // per-category rank.
+    // Player lines are never trimmed; non-player ones fill whatever
+    // budget is left, most-recent-first (nonPlayerLines already arrives
+    // in chronological order from RecentEventBuffer, so trimming from
+    // the front drops the oldest excess).
+    private static List<string> CapHeardLines(List<string> playerLines, List<string> nonPlayerLines, int maxTotal)
+    {
+        int nonPlayerBudget = System.Math.Max(0, maxTotal - playerLines.Count);
+        var result = new List<string>(playerLines);
+        result.AddRange(CapToMostRecent(nonPlayerLines, nonPlayerBudget));
+        return result;
+    }
+
+    private static List<string> CapToMostRecent(List<string> lines, int max) =>
+        lines.Count > max ? lines.Skip(lines.Count - max).ToList() : lines;
+
+    private readonly record struct EnvCandidate(string Line, float Distance);
+
     // Shared by BuildPerception() for all four resource types (trees,
     // fishing spots, pine trees, berry bushes) — same sort-take-
     // describe shape each needs, just a different id prefix and a
     // different way to read "how much is left" (AppleTree/FishingSpot/
     // GatherableFoliage don't share an interface for that, so a lambda
-    // reads it instead of forcing one in just for this).
-    private const int NearbyResourceCount = 6;
-    private void AppendNearestResources<T>(List<string> lines, List<T> items, string idPrefix, System.Func<T, int> remaining, string itemPlural) where T : Node2D
+    // reads it instead of forcing one in just for this). Returns nearest-
+    // first candidates rather than appending them directly — actual
+    // selection happens in MergeGuaranteedDiversityThenNearest below,
+    // since one category alone can't tell whether it deserves a spot
+    // before every OTHER category has had its guaranteed first pick.
+    private const int NearbyResourceCount = 6; // max candidate depth per category the merge below will ever consider — generous, since EnvironmentCharBudget almost always runs out well before any category gets this deep
+    private List<EnvCandidate> NearestResourceLines<T>(List<T> items, string idPrefix, System.Func<T, int> remaining, string itemPlural) where T : Node2D
     {
-        List<(T Item, int Index)> nearest = items
-            .Select((item, i) => (item, i))
-            .OrderBy(pair => Actor.GlobalPosition.DistanceTo(pair.item.GlobalPosition))
+        // Bounded to SpatialMemory.VisionRadius — same "actually see it
+        // vs. only abstractly know it exists" line SpatialMemory itself
+        // already draws (see its own header). Without this, a resource
+        // type with only one or two instances anywhere on the map would
+        // always have its "nearest" one guaranteed a slot by the merge
+        // below no matter how far away that actually is — an NPC
+        // standing at home has no business having "aware of a fishing
+        // spot 3000px away" in its immediate perception text. Used to
+        // also be deliberately NOT the same mechanism as target_id enum
+        // foreknowledge (TreeIds()/StickIds()/etc. via AvailableTargets,
+        // built elsewhere) — that used to be an intentional, unbounded
+        // "you know roughly where to go looking" allowance. That's since
+        // been reversed (see SortByDistance's own header, 2026-09-08):
+        // AvailableTargets is vision-filtered now too, same VisionRadius
+        // bound as this method, so the two are no longer meaningfully
+        // different leashes — both mean "what's actually in front of you
+        // right now."
+        return items
+            .Select((item, i) => (item, i, dist: Actor.GlobalPosition.DistanceTo(item.GlobalPosition)))
+            .Where(t => t.dist <= SpatialMemory.VisionRadius)
+            .OrderBy(t => t.dist)
             .Take(NearbyResourceCount)
+            .Select(t => new EnvCandidate($"{idPrefix}_{t.i}: {remaining(t.item)} {itemPlural} left, {(int)t.dist} px away", t.dist))
             .ToList();
-        foreach ((T item, int i) in nearest)
-        {
-            int dist = (int)Actor.GlobalPosition.DistanceTo(item.GlobalPosition);
-            lines.Add($"{idPrefix}_{i}: {remaining(item)} {itemPlural} left, {dist} px away");
-        }
     }
 
+    // Two-phase fill, not flat round-robin: (1) GUARANTEE the single
+    // closest candidate from every category first — a category that
+    // happens to have a lot of nearby instances (30 apple trees) can
+    // never crowd out a genuinely distinct kind of thing (the one stick
+    // around) just by being more numerous — then (2) pool everything
+    // left over from every category together and fill the REMAINING
+    // budget by genuine global distance order, category no longer
+    // mattering once diversity is satisfied. That second phase is what a
+    // flat round-robin gets wrong: "2nd-closest tree" and "2nd-closest
+    // stick" aren't equally deserving of the next slot just because
+    // they're both someone's 2nd pick — if 30 trees genuinely cluster
+    // nearby and 30 sticks are all much farther off, the remaining
+    // slots should mostly go to more trees (they're more actionable
+    // right now), with only the sticks that happen to rank competitively
+    // by actual distance mixed in — not a mechanical 50/50 split. Stops
+    // once nothing more fits in the shared char budget or every
+    // candidate's been considered. A line that doesn't fit is skipped,
+    // not fatal to the whole pass, so a later, shorter one still gets a
+    // chance.
+    private const int EnvironmentCharBudget = 1000;
+    private static List<string> MergeGuaranteedDiversityThenNearest(params List<EnvCandidate>[] categories)
+    {
+        var result = new List<string>();
+        int budget = EnvironmentCharBudget;
+
+        bool TryAdd(EnvCandidate c)
+        {
+            if (c.Line.Length + 1 > budget) // +1 for the newline it'll cost once joined
+                return false;
+            result.Add(c.Line);
+            budget -= c.Line.Length + 1;
+            return true;
+        }
+
+        // Phase 1 — guaranteed diversity: each category's own closest
+        // candidate, regardless of how it compares to any other
+        // category's closest.
+        var leftover = new List<EnvCandidate>();
+        foreach (List<EnvCandidate> category in categories)
+        {
+            if (category.Count == 0)
+                continue;
+            TryAdd(category[0]);
+            leftover.AddRange(category.Skip(1));
+        }
+
+        // Phase 2 — whatever's left, purely by distance, category no
+        // longer relevant.
+        foreach (EnvCandidate c in leftover.OrderBy(c => c.Distance))
+            TryAdd(c);
+
+        return result;
+    }
+
+    // Fixed, one-line scene-setting — SETTING's own slot in the labeled
+    // perception below (2026-09-08 rewrite). Static for the whole
+    // project's world, so a single constant is enough; kept in sync by
+    // hand with llm_tuning/common.py's SETTING_LINE.
+    private const string SettingLine =
+        "A garden clearing by your home, beside a winding river, with forest, foothills, and misty mountains to the north.";
+
+    // Labeled-section rewrite, 2026-09-08 — see Mind.ActInstruction's own
+    // header for the full reasoning (llm_tuning's baseline eval measured
+    // no real regression from this). Persona (BACKGROUND/PERSONALITY) and
+    // STATS moved OUT of here entirely — they used to open this same
+    // string AND sit in the system message via Personality.
+    // DescribeForPrompt(), duplicated on every single call; now they live
+    // once, system-message-only (see Mind.Decide/DecidePlayerRequest's
+    // own statsLine parameter). freshHeard/freshWitnessed used to sit
+    // "right up front, not buried" for salience — that reasoning belonged
+    // to the old flat-paragraph shape; the labeled HEARD section below
+    // keeps the same information just as findable by its own header, in
+    // the position llm_tuning/common.py's build_situation() actually
+    // benchmarked (last, after YOU) — matching what was actually
+    // validated mattered more here than preserving the old placement.
     private string BuildPerception(List<string> freshHeard, List<string> freshWitnessed)
     {
-        var lines = new List<string> { Personality.DescribeForPrompt() };
+        var sections = new List<string> { $"SETTING: {SettingLine}" };
         if (_lastResultLine != "")
-            lines.Add(_lastResultLine);
-        // Right up front, not buried in Memory's chronological dump —
-        // see the caller's own comments on freshHeard/freshWitnessed
-        // for why both needed their own prominent spot.
-        lines.AddRange(freshHeard);
-        lines.AddRange(freshWitnessed);
+            sections.Add($"LAST RESULT: {_lastResultLine}");
 
-        // Nearest-N, not "every one that exists" — fine when the world
-        // was a fixed 3 trees + 2 fishing spots, but exploration-driven
-        // generation (see WorldExploration) can grow any of these lists
-        // indefinitely (up to WorldExploration.MaxMapBounds) as
-        // characters wander. Capping to what's actually close keeps the
-        // prompt bounded regardless of how much of the map has been
-        // uncovered, and "what's nearby" is what a decision about
-        // gathering actually needs anyway — a tree three regions away
-        // isn't a real option this turn. One shared helper (below) for
-        // all four resource lists rather than four copies of the same
-        // sort-take-describe dance.
-        AppendNearestResources(lines, _world.Trees, "tree", t => t.AppleCount, "apples");
-        AppendNearestResources(lines, _world.FishingSpots, "fish", f => f.FishCount, "fish");
-        AppendNearestResources(lines, _world.PineTrees, "pine", p => p.Count, "pinecones");
-        AppendNearestResources(lines, _world.BerryBushes, "berry", b => b.Count, "berries");
+        // Nearest-N per category, THEN merged by guaranteed-diversity-
+        // then-nearest with a shared character budget
+        // (MergeGuaranteedDiversityThenNearest, below) — not appended
+        // straight to a section's lines. A flat per-category cap alone isn't
+        // enough: it stops one category (say, trees) from crowding out
+        // ANOTHER category's own reserved slots, but it does nothing
+        // about the total size once there are enough categories, and it
+        // still means "the 7th-closest tree" beats "a stick a little
+        // further away" for no good reason if trees happen to run first
+        // — the two aren't really competing for the same thing. Nor is a
+        // flat round-robin actually right either: it would treat
+        // "2nd-closest tree" and "2nd-closest stick" as equally
+        // deserving of the next slot just because they're both someone's
+        // 2nd pick. Guaranteed-diversity-then-nearest fixes both: every
+        // distinct kind of nearby object gets its closest instance
+        // considered before ANY category gets a second one (so 30 apple
+        // trees around an NPC can never bury the one stick a request was
+        // actually about), and everything left over after that
+        // competes on genuine distance alone — so if those 30 trees
+        // really are closer on average than 30 sticks scattered farther
+        // off, most of the remaining budget naturally goes to more
+        // trees, with only the sticks that actually rank competitively
+        // by distance mixed in, not a mechanical split. Built once for
+        // exploration-driven generation (see WorldExploration) letting
+        // any of these lists grow
+        // indefinitely as characters wander — "what's nearby" is what a
+        // decision about gathering actually needs anyway, not a tree
+        // three regions away.
+        // Resource candidates (trees/fish/pine/berry) used to feed into
+        // the SAME shared-budget merge as people/animals/sticks below —
+        // reverted 2026-09-08, the same day the merge itself got labeled
+        // sections: llm_tuning's baseline eval measured pick_apple recall
+        // crash from a consistent 66-83% (every prior clean-prompt run
+        // this session) to 8.3% the one time resources competed with
+        // NEARBY's npc/animal/stick pool for space in a live A/B test —
+        // a real, reproducible regression from THIS specific grouping,
+        // not sampling noise (four separate prior runs all landed in that
+        // 66-83% band). Shown unconditionally under ENVIRONMENT instead,
+        // same as home/the fire pit — never competing with NEARBY for
+        // budget. Each category is still vision-radius-filtered and
+        // capped at NearbyResourceCount by NearestResourceLines itself,
+        // so this isn't actually unbounded, just no longer sharing a
+        // budget with an unrelated kind of "what's around."
+        List<EnvCandidate> treeLines = NearestResourceLines(_world.Trees, "tree", t => t.AppleCount, "apples");
+        List<EnvCandidate> fishLines = NearestResourceLines(_world.FishingSpots, "fish", f => f.FishCount, "fish");
+        List<EnvCandidate> pineLines = NearestResourceLines(_world.PineTrees, "pine", p => p.Count, "pinecones");
+        List<EnvCandidate> berryLines = NearestResourceLines(_world.BerryBushes, "berry", b => b.Count, "berries");
+
+        var envLines = new List<string>();
 
         int homeDist = (int)Actor.GlobalPosition.DistanceTo(_world.Home.GlobalPosition);
-        lines.Add($"home: {homeDist} px away, {_world.Home.ApplesStored} apples and {_world.Home.FishStored} fish stored there so far");
+        envLines.Add($"home: {homeDist} px away, {_world.Home.ApplesStored} apples and {_world.Home.FishStored} fish stored there so far");
 
         // "Someone asked for help lighting the fire, and Maren said
         // yes... then never actually called light_fire, inventing a
@@ -1291,7 +1483,7 @@ public partial class NpcAgent : Node, IWorldCharacter
         // doesn't exist in this game at all rather than just walking up
         // and lighting it.
         int firePitDist = (int)Actor.GlobalPosition.DistanceTo(_world.FirePit.GlobalPosition);
-        lines.Add(_world.FirePit.IsLit
+        envLines.Add(_world.FirePit.IsLit
             ? $"fire pit: {firePitDist} px away, near home, burning right now — a stick can be lit from it to make a torch, and raw rabbit meat can be cooked over it."
             : $"fire pit: {firePitDist} px away, near home, not lit right now — nothing is needed to light it, no stick or fuel or anything else required, just walk up and light it with the light_fire action whenever you want a fire going.");
 
@@ -1303,97 +1495,112 @@ public partial class NpcAgent : Node, IWorldCharacter
         {
             string id = kv.Key;
             int dist = (int)Actor.GlobalPosition.DistanceTo(kv.Value.GlobalPosition);
-            lines.Add(Spatial.Knows(id)
+            envLines.Add(Spatial.Knows(id)
                 ? $"{id}: a place you've actually been before, {dist} px away."
                 : $"{id}: a hazy, distant landmark you've only ever seen from afar — you don't know a real path there, only that it's roughly {dist} px away.");
         }
+
+        // Nearest-resource-first across all four categories together —
+        // see this method's own header for why these no longer share
+        // NEARBY's budget with people/animals/sticks.
+        envLines.AddRange(
+            treeLines.Concat(fishLines).Concat(pineLines).Concat(berryLines)
+                .OrderBy(c => c.Distance)
+                .Select(c => c.Line)
+        );
+        sections.Add("ENVIRONMENT:\n" + string.Join("\n", envLines));
 
         // Who's actually around right now, by name — talking, hearing,
         // and follow all only work within SpeechLog.HearingRadius, and
         // knowing WHO (not just that someone) is nearby is what makes
         // "declare something and see who's around" or "follow Wren" a
-        // real, groundable decision rather than a guess. Nearest-N, same
-        // cap and same reasoning as AppendNearestResources above (see its
-        // own comment) — a direct request/heard line always survives
-        // regardless (added earlier, unconditionally), only exhaustive
-        // "who's nearby" listings ever get trimmed if the roster or
-        // population grows past what's worth spending prompt budget on;
-        // which specific extra rabbit or bystander gets left off doesn't
-        // change the decision, since the closest ones are always the
-        // most actionable ones anyway.
-        List<(IWorldCharacter Other, int Dist)> nearbyAgents = _world.Agents
+        // real, groundable decision rather than a guess. A direct
+        // request/heard line always survives regardless (added earlier,
+        // unconditionally) — only this exhaustive "who's nearby" listing
+        // competes for the shared environment budget below.
+        List<EnvCandidate> npcLines = _world.Agents
             .Where(other => other.Id != Id)
-            .Select(other => (other, (int)Actor.GlobalPosition.DistanceTo(other.GlobalPosition)))
-            .Where(pair => pair.Item2 <= SpeechLog.HearingRadius)
-            .OrderBy(pair => pair.Item2)
+            .Select(other => (other, dist: Actor.GlobalPosition.DistanceTo(other.GlobalPosition)))
+            .Where(p => p.dist <= SpeechLog.HearingRadius)
+            .OrderBy(p => p.dist)
             .Take(NearbyResourceCount)
+            .Select(p => new EnvCandidate($"{p.other.DisplayName} is nearby, {(int)p.dist} px away, feeling {p.other.CurrentEmotion.ToWireString()}.", p.dist))
             .ToList();
-        foreach ((IWorldCharacter other, int dist) in nearbyAgents)
-            lines.Add($"{other.DisplayName} is nearby, {dist} px away, feeling {other.CurrentEmotion.ToWireString()}.");
 
-        // Wild animals — same hearing-range scoping and same nearest-N
-        // cap as nearby people above (a rabbit population that's grown
-        // large, or several clustered near a food source, shouldn't cost
-        // more prompt budget than any other kind of "what's around").
-        // Framed with enough to actually judge the situation (species,
-        // distance, whether it's actively coming for YOU or someone
-        // else specifically) without exposing raw internal numbers
-        // (Hunger%, Health) that would just be noise to reason about —
-        // "it looks hostile" is the actionable fact, not the number
-        // behind it. A wolf/bear that ISN'T attacking anyone right now
-        // still gets an explicit "worth being careful around" note —
-        // this is what feeds NpcAgent's own is_alert handling (see
-        // DetectAlertAnimal/HandleAlert) into the LLM's normal turn
+        // Wild animals — same hearing-range scoping as nearby people
+        // above (a rabbit population that's grown large, or several
+        // clustered near a food source, shouldn't out-compete every
+        // other kind of "what's around" for space, just get its own fair
+        // share of it). Framed with enough to actually judge the
+        // situation (species, distance, whether it's actively coming for
+        // YOU or someone else specifically) without exposing raw
+        // internal numbers (Hunger%, Health) that would just be noise to
+        // reason about — "it looks hostile" is the actionable fact, not
+        // the number behind it. A wolf/bear that ISN'T attacking anyone
+        // right now still gets an explicit "worth being careful around"
+        // note — this is what feeds NpcAgent's own is_alert handling
+        // (see DetectAlertAnimal/HandleAlert) into the LLM's normal turn
         // too, not just this NPC's own mechanical reflex to it.
-        List<(Animal Animal, int Dist)> nearbyAnimals = _world.Animals
-            .Select(a => (a, (int)Actor.GlobalPosition.DistanceTo(a.GlobalPosition)))
-            .Where(pair => pair.Item2 <= SpeechLog.HearingRadius)
-            .OrderBy(pair => pair.Item2)
+        List<EnvCandidate> animalLines = _world.Animals
+            .Select(a => (a, dist: Actor.GlobalPosition.DistanceTo(a.GlobalPosition)))
+            .Where(p => p.dist <= SpeechLog.HearingRadius)
+            .OrderBy(p => p.dist)
             .Take(NearbyResourceCount)
+            .Select(p =>
+            {
+                string species = p.a switch { Wolf => "wolf", Bear => "bear", Rabbit => "rabbit", _ => "animal" };
+                bool hostileNow = p.a.CurrentState == Animal.State.Attacking || p.a.CurrentState == Animal.State.Chasing;
+                string note = species == "rabbit" ? " — harmless, just foraging."
+                    : hostileNow && p.a.CurrentTarget == Actor ? " — it's coming for YOU, right now!"
+                    : hostileNow && p.a.CurrentTarget is NPCActor victimActor ? $" — it's attacking {_world.NameOf(victimActor) ?? "someone nearby"} right now!"
+                    : " — a dangerous animal, not attacking anyone right now, but worth being careful around.";
+                return new EnvCandidate($"{p.a.WorldId} ({species}): {(int)p.dist} px away{note}", p.dist);
+            })
             .ToList();
-        foreach ((Animal a, int dist) in nearbyAnimals)
-        {
-            string species = a switch { Wolf => "wolf", Bear => "bear", Rabbit => "rabbit", _ => "animal" };
-            bool hostileNow = a.CurrentState == Animal.State.Attacking || a.CurrentState == Animal.State.Chasing;
-            string note;
-            if (species == "rabbit")
-                note = " — harmless, just foraging.";
-            else if (hostileNow && a.CurrentTarget == Actor)
-                note = " — it's coming for YOU, right now!";
-            else if (hostileNow && a.CurrentTarget is NPCActor victimActor)
-                note = $" — it's attacking {_world.NameOf(victimActor) ?? "someone nearby"} right now!";
-            else
-                note = " — a dangerous animal, not attacking anyone right now, but worth being careful around.";
-            lines.Add($"{a.WorldId} ({species}): {dist} px away{note}");
-        }
 
-        // Sticks on the ground — NOT AppendNearestResources (that
+        // Sticks on the ground — NOT NearestResourceLines (that
         // reconstructs "{prefix}_{list index}", which breaks here the
         // same way it would for animals: a stick can be picked up from
-        // the middle of the list, shifting every later index), but still
-        // the same nearest-N cap, same reasoning — currently always a
-        // small handful in practice, capped anyway so a future content
-        // change that scatters more sticks around doesn't reopen this.
-        List<(Stick Stick, int Dist)> nearbySticks = _world.Sticks
-            .Select(s => (s, (int)Actor.GlobalPosition.DistanceTo(s.GlobalPosition)))
-            .Where(pair => pair.Item2 <= SpeechLog.HearingRadius)
-            .OrderBy(pair => pair.Item2)
+        // the middle of the list, shifting every later index) — but the
+        // same hearing-range scoping, sorted nearest-first the same way.
+        List<EnvCandidate> stickLines = _world.Sticks
+            .Select(s => (s, dist: Actor.GlobalPosition.DistanceTo(s.GlobalPosition)))
+            .Where(p => p.dist <= SpeechLog.HearingRadius)
+            .OrderBy(p => p.dist)
             .Take(NearbyResourceCount)
+            .Select(p => new EnvCandidate($"{p.s.WorldId} (stick): {(int)p.dist} px away, lying on the ground.", p.dist))
             .ToList();
-        foreach ((Stick s, int dist) in nearbySticks)
-            lines.Add($"{s.WorldId} (stick): {dist} px away, lying on the ground.");
 
-        lines.Add($"You are carrying: {Actor.Inventory.Describe()}.");
-        lines.Add($"You are currently feeling {Actor.CurrentEmotion.ToWireString()}.");
-        // Full self-awareness of your own stats and condition — same
-        // numbers every check against you actually uses, not a hint or
-        // a summary. Nothing reads this and forces a decision (no code
-        // anywhere blocks travel/gathering on low fatigue) — it's
-        // information for you to reason about like anything else here.
-        lines.Add($"Your natural abilities: {Actor.Stats.Describe()}.");
-        lines.Add($"Your physical condition: {Actor.Vitals.Describe()}.");
+        // The actual guaranteed-diversity-then-nearest merge — see this
+        // method's own comment for why a flat per-category cap (or a
+        // flat round-robin) alone isn't enough.
+        List<string> nearby = MergeGuaranteedDiversityThenNearest(npcLines, animalLines, stickLines);
+        if (nearby.Count > 0)
+            sections.Add("NEARBY:\n" + string.Join("\n", nearby));
 
-        return $"{string.Join("\n", lines)}\n\n{Memory.Render()}";
+        // MEMORY gets its own labeled block, not appended as a bare
+        // trailing paragraph the way it used to be — Memory.Render() can
+        // itself be multi-line (a diary summary AND a "Recently:" raw
+        // chronological block), so this needs the same "SECTION:\n..."
+        // shape as ENVIRONMENT/NEARBY above, not an inline "MEMORY: ..."
+        // that would only actually label its own first line.
+        sections.Add($"MEMORY:\n{Memory.Render()}");
+
+        // Full self-awareness of your own condition — same numbers every
+        // check against you actually uses, not a hint or a summary.
+        // Nothing reads this and forces a decision (no code anywhere
+        // blocks travel/gathering on low fatigue) — it's information for
+        // you to reason about like anything else here. STATS moved to
+        // the system message (see this method's own header); vitals stay
+        // here since they change turn to turn.
+        sections.Add($"YOU: carrying {Actor.Inventory.Describe()}; feeling {Actor.CurrentEmotion.ToWireString()}; {Actor.Vitals.Describe()}");
+
+        var heard = new List<string>(freshHeard);
+        heard.AddRange(freshWitnessed);
+        if (heard.Count > 0)
+            sections.Add("HEARD:\n" + string.Join("\n", heard));
+
+        return string.Join("\n\n", sections);
     }
 
     // Named-landmark description for the memory trail — raw coordinates

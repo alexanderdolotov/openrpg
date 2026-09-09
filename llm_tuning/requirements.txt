@@ -5,7 +5,8 @@
 # Everything below is for the later stages (fine-tuning + eval), same core
 # stack as https://github.com/alexanderdolotov/llm_financial_news_market_data.
 # Needs an NVIDIA/CUDA GPU (Unsloth's fast path) — not this Mac; see
-# README.md's "Where training actually runs" section.
+# README.md's "Running this on analytics.local" section. Not needed at all
+# for 5_baseline_eval.py, which is stdlib-only by design.
 
 unsloth
 trl

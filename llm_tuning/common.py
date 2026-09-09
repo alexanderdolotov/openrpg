@@ -9,10 +9,13 @@ training distribution doesn't match what the game actually sends over
 gameplay. When Mind.cs's instructions or BuildTools() change, port the
 change here too, in the same commit.
 
-Ported from (as of the 2026-09-07 session):
+Ported from (as of the 2026-09-08 clean-prompt rewrite, ported into the
+real game the same day):
   - Mind.PlayerRequestInstruction, Mind.ActInstruction
   - Mind.BuildTools()
   - Mind.ValidActions, Mind.ItemTypes, EmotionExtensions.AllValues
+  - Personality.DescribeForPrompt() (BACKGROUND/PERSONALITY; STATS is
+    appended by Mind.Decide/DecidePlayerRequest, not Personality itself)
   - NpcAgent.BuildPerception() (situation-text shape, not the live world)
 """
 from __future__ import annotations
@@ -25,77 +28,29 @@ from dataclasses import dataclass, field
 # don't paraphrase, or the fine-tune trains against a prompt the game never
 # actually sends.
 
+# --- Rewritten clean/minimal, 2026-09-08, per the hypothesis that the old
+# paragraph-of-nuance instructions (preserved via git history) were adding
+# noise a 3B model struggles to track rather than helping it —
+# llm_tuning's baseline eval measured no real regression from shrinking
+# them, and PORTED INTO Mind.cs/NpcAgent.cs/Personality.cs the same day.
+# This file and the real game's prompt are meant to stay in sync from here
+# — when one changes, port the change to the other in the same commit,
+# same fidelity rule this file has always followed. See build_situation()/
+# persona_line() below for the matching switch to labeled sections in the
+# situation text itself.
 ACT_INSTRUCTION = (
-    "Call exactly one of the provided tools that matches the plan below. If you were already in the middle of something — following "
-    "someone, traveling somewhere, working toward a goal you'd set for yourself — lean toward sticking with it for a while rather than "
-    "switching every single turn just because you technically can; a goal worth having is worth a bit of follow-through. Only actually "
-    "change course when it's genuinely finished, clearly not working out, or something that actually matters more just happened — a real "
-    "reason, not a passing whim. (This call is never even reached while something dangerous — a wolf or bear actively coming for you — "
-    "is happening; see DecideThreatResponse below for that entirely separate, narrower decision.) If your last action failed — "
-    "especially if it failed more than once in a row for the same reason — do not just repeat it; pick something that actually "
-    "addresses why it failed (e.g. deposit before trying to pick or catch again, or choose a different target if one is depleted). "
-    "travel is a valid choice on its own, out of curiosity, even toward somewhere you've never been and don't know the way to — you "
-    "don't need a resource-gathering reason to go look at something. speak lets you say something out loud in your own words — anyone "
-    "within hearing range right now may hear it and decide how to react on their own later, including being persuaded, won over, or "
-    "talked into something if what you say actually lands with them; it does not control or compel anyone, and if nobody's around, "
-    "nobody hears it, which is a perfectly normal outcome of speaking. follow lets you walk alongside someone nearby by name — a "
-    "genuine choice you make (or don't) based on your own read of them and what's been said, not something anyone can force; re-decide "
-    "it fresh every turn just like anything else, which means choosing follow AGAIN, turn after turn, is what actually keeps you with "
-    "them — arriving next to them once doesn't mean you're done, they may well walk on right after, and only choosing something else "
-    "is what actually stops you following. If another character (not the player) just directly asked you to follow them or help with "
-    "something, that request is the main thing to weigh right now — follow (if you're actually persuaded) or speak (to say yes, no, or "
-    "ask something back) are both real, direct responses to it; picking something completely unrelated, like gathering, is turning "
-    "them down without saying so, which is a worse look than an honest no. (A direct ask from the real human player never actually "
-    "reaches this decision at all — it's answered separately, immediately, the turn it's heard; see DecidePlayerRequest.) trade gives "
-    "someone nearby an item you're actually "
-    "carrying — a real choice about generosity or self-interest, entirely up to you. steal takes an item from someone nearby without "
-    "asking and without them agreeing to it — you don't know for certain what they're carrying, only a guess, it takes real nerve and a "
-    "little luck (you can simply fail even if they do have it), and it's not hidden from them forever, since anyone keeps their own "
-    "count of what they're carrying and can notice later that something's missing. sleep rests where you are and fully restores your "
-    "fatigue (and health), but takes a while — worth doing once you're actually tired, not as a routine choice, and pay attention to "
-    "your own fatigue level below: if you're exhausted, that's a real, physical reason to sleep before doing anything else, or to turn "
-    "down something demanding (a long trip, more gathering) rather than push through it — nobody is forcing that consideration on you, "
-    "it's just true of your own body right now. eat restores health and hunger from something you're already carrying — but pay "
-    "attention to your health and hunger levels below even when eat ISN'T offered yet: if either is getting low and you're not carrying "
-    "any food, that's a real, physical reason to go gather something you can actually eat (an apple, a fish, or a berry — a pinecone "
-    "doesn't count, it's not food) before continuing with whatever else you were doing, the same way low fatigue is a real reason to go "
-    "sleep. pick_up_stick is worth doing any time you notice one lying around, not just when you're already thinking about a fight — "
-    "it's a real upgrade over bare hands, cheap to grab in passing. attack isn't only self-defense — hunting a wild animal (a rabbit, "
-    "for its meat and fur) is a completely ordinary thing to go do on your own initiative when you want food or have nothing better in "
-    "mind, the same as choosing to gather fruit or catch a fish; you don't need to already be in danger to pick it as your goal for the "
-    "turn. light_fire (lighting the fire pit near home) and, once it's burning, make_torch (turning a stick you're carrying into a real "
-    "personal light source) and cook_meat (turning raw rabbit meat — not edible on its own — into cooked meat, the single most filling "
-    "food there is) are all genuinely worthwhile things to go do, not just emergency tools: tending the fire, making yourself a torch, "
-    "or cooking up what you hunted are all perfectly normal reasons to head home for a while. Set emotion to how you're genuinely "
-    "feeling, reacting to what just happened as much as your personality — frustration or disappointment after a repeated failure, "
-    "satisfaction after a success, not a fixed mood. Only ever target an id that is explicitly listed in the situation — never invent "
-    "one that isn't there. Choose whichever tool actually fits who you are and what you want right now — nothing assigns you a role."
+    "Call exactly one of the tools listed below — whichever one best fits your personality, stats, and the situation above right now. "
+    "If your last action just failed, don't repeat it — pick something that addresses why. Only target an id that's explicitly listed "
+    "above; never invent one."
 )
 
 PLAYER_REQUEST_INSTRUCTION = (
-    "The real human player — not another character in this world — just said something to you directly, described in the situation below. "
-    "Your only job this turn is to answer them, right now, with a real tool call. First figure out which of two things this actually is: a "
-    "QUESTION, or a REQUEST to do something. If they asked a question — about you, what you're carrying, your stats, your condition, where you "
-    "are, what you're doing, anything you'd genuinely know the answer to — call speak and give the real, specific answer, using the actual "
-    "information already provided to you below (your inventory, your natural abilities, your physical condition, your location) — an exact "
-    "count or fact if you have one (\"I have 3 apples\"), not a vague deflection, a change of subject, or an unrelated action like "
-    "follow/travel/wait; if you truly don't know or don't have whatever they're asking about, say THAT plainly (\"I don't have any\"), which is "
-    "still a real, honest answer. If instead they're asking you to DO something, decide whether you're going along with it: call whichever "
-    "single tool actually matches it — follow to walk with them, catch_fish/pick_apple/gather_pinecone/gather_berry to do the activity they "
-    "proposed together, travel if they're inviting you somewhere, trade if they asked for an item, attack if they want help fighting something, "
-    "pick_up_stick if they're pointing one out, light_fire if they want the fire pit lit (it needs nothing else at all — no stick, no fuel, "
-    "nothing in your inventory, just walk up and light it, so don't stall on 'checking if it needs fuel first' or anything like that — that "
-    "isn't a real requirement), make_torch if they want you to turn a stick you're carrying into a torch, cook_meat if they want raw meat "
-    "cooked, or whatever else genuinely fits what they said — and actually call that tool THIS turn if you're going along with it, not just say "
-    "you will and leave the real action for later; agreeing out loud without ever calling the matching tool is the same as not helping at all. "
-    "Musing about it out loud is the same problem wearing a softer voice — 'maybe I could try that' or 'I'm not sure, but I do have what I'd "
-    "need' is still not a decision, just a decision-shaped sentence; if you're leaning toward yes, commit and call the tool, don't describe "
-    "yourself almost doing it. If you're not going along with it or you're genuinely unsure, call speak and say so directly and PLAINLY, in "
-    "your own words — a clear 'no' or 'I don't know' — not a hedge that quietly implies yes while technically committing to nothing. Weigh it "
-    "honestly against your personality and whatever else is going on, same as any other choice, but reaching for something UNRELATED to what "
-    "they actually said or asked — gathering on your own, wandering off, waiting, following someone when they asked a question, or repeatedly "
-    "talking ABOUT helping without ever calling the tool that actually does it — is not a real option right now: that's dodging, not answering, "
-    "and a worse look than an honest no or \"I don't know.\""
+    "The player just spoke to you directly — see HEARD above. Answer them this turn with a real tool call, not just words. "
+    "If it's a question, call speak with the honest, specific answer from what's listed above. If it's a request to do something, call "
+    "the one matching tool right now if you're willing — including a casual \"come with me\"/\"walk with me\"/\"stay with me\" (that's "
+    "follow, even without the word \"follow\" in it) — or call speak to say no, plainly, if you're not willing, or if the tool for it "
+    "isn't listed below at all right now. If they said both a question AND a request in the same line, answer the request — it's "
+    "the time-sensitive half; the fact they asked about is still just as true and still answerable next time they ask."
 )
 
 EMOTIONS = ["neutral", "happy", "sad", "excited", "fearful", "angry", "curious", "content"]
@@ -136,6 +91,7 @@ def _emotion_prop(description: str = "how you're feeling right now") -> dict:
     return {"type": "string", "enum": EMOTIONS, "description": description}
 
 
+
 def build_tools(targets: AvailableTargets) -> list[dict]:
     """Faithful port of Mind.BuildTools() — same tools, same conditional
     gating, same field names, in the same order. This is exactly the
@@ -154,14 +110,6 @@ def build_tools(targets: AvailableTargets) -> list[dict]:
         }
 
     tools = [
-        fn("pick_apple", "Walk to an apple tree and pick an apple from it.",
-           {"target_id": {"type": "string", "enum": targets.tree_ids, "description": "which tree to pick from"},
-            "emotion": _emotion_prop()},
-           ["target_id", "emotion"]),
-        fn("catch_fish", "Walk to a spot along the river and try to catch a fish there.",
-           {"target_id": {"type": "string", "enum": targets.fishing_spot_ids, "description": "which fishing spot to try"},
-            "emotion": _emotion_prop()},
-           ["target_id", "emotion"]),
         fn("deposit", "Walk home and deposit everything you're currently carrying, whatever the mix of items.",
            {"target_id": {"type": "string", "enum": ["home"]}, "emotion": _emotion_prop()},
            ["target_id", "emotion"]),
@@ -181,6 +129,22 @@ def build_tools(targets: AvailableTargets) -> list[dict]:
         tools.append(fn("sleep",
             "Rest right where you are and fully restore your fatigue. Takes a while — a real choice for when you're actually tired, not routine.",
             {"emotion": _emotion_prop()}, ["emotion"]))
+
+    # pick_apple/catch_fish used to sit unconditionally above — "hand-placed
+    # and guaranteed to exist from the start." That covered EXISTENCE, not
+    # PROXIMITY: tree_ids/fishing_spot_ids are vision-filtered now (see
+    # NpcAgent.SortByDistance's own header in the parent project), so the
+    # enum genuinely can be empty. Same enum-of-nothing guard every other
+    # resource tool already needed.
+    if targets.tree_ids:
+        tools.append(fn("pick_apple", "Walk to an apple tree and pick an apple from it.",
+            {"target_id": {"type": "string", "enum": targets.tree_ids, "description": "which tree to pick from"},
+             "emotion": _emotion_prop()}, ["target_id", "emotion"]))
+
+    if targets.fishing_spot_ids:
+        tools.append(fn("catch_fish", "Walk to a spot along the river and try to catch a fish there.",
+            {"target_id": {"type": "string", "enum": targets.fishing_spot_ids, "description": "which fishing spot to try"},
+             "emotion": _emotion_prop()}, ["target_id", "emotion"]))
 
     if targets.pine_tree_ids:
         tools.append(fn("gather_pinecone", "Walk to a pine tree and gather a pinecone from it.",
@@ -245,28 +209,44 @@ def build_tools(targets: AvailableTargets) -> list[dict]:
 
     if targets.cook_meat_allowed:
         tools.append(fn("cook_meat",
-            "Cook raw rabbit meat over the burning fire pit, turning it into cooked meat — the single most filling food there is.",
+            "Cook raw rabbit meat you're carrying over the burning fire pit, turning it into cooked meat — restores far more health "
+            "and hunger than raw meat (which isn't edible at all) when you eat it later, anytime, anywhere.",
             {"emotion": _emotion_prop()}, ["emotion"]))
 
     return tools
 
 
-# --- Persona / vitals / inventory text — same shape as the C# Describe() --
+# --- Persona / vitals / inventory text ---------------------------------
+# Labeled-section rewrite, 2026-09-08 — see ACT_INSTRUCTION's own header.
+# describe_personality() used to return ONE dense sentence
+# ("You are X. backstory Your personality: traits.") that was also
+# duplicated as the first line of the user message (BuildPerception()'s own
+# perception text starts with Personality.DescribeForPrompt() too) — this
+# drops that duplication entirely: background/personality/stats now live
+# ONCE, in the system message only (see persona_line() below), and the user
+# message (build_situation()) covers only what changes turn to turn.
 
-def describe_personality(name: str, backstory: str, openness: float, conscientiousness: float,
-                          extraversion: float, agreeableness: float, neuroticism: float) -> str:
+def describe_personality_traits(openness: float, conscientiousness: float,
+                                 extraversion: float, agreeableness: float, neuroticism: float) -> str:
     def word(v: float, low: str, mid: str, high: str) -> str:
         return low if v < 0.35 else high if v > 0.65 else mid
 
-    traits = [
+    return ", ".join([
         word(openness, "set in your ways", "reasonably open-minded", "very curious and open to new things"),
         word(conscientiousness, "impulsive and easily distracted", "fairly steady", "disciplined and careful"),
         word(extraversion, "quiet and reserved", "moderately sociable", "outgoing and talkative"),
         word(agreeableness, "blunt and guarded with strangers", "generally cooperative", "warm and trusting"),
         word(neuroticism, "even-tempered", "occasionally anxious", "easily rattled"),
-    ]
-    backstory_line = f" {backstory}" if backstory else ""
-    return f"You are {name}.{backstory_line} Your personality: {', '.join(traits)}."
+    ])
+
+
+# Fixed, one-line scene-setting — never appeared as its own concept in the
+# old prompt (the dynamic resource lines WERE the only sense of place a
+# turn got). Static per the whole project's world (see the parent repo's
+# README's "Apple Garden Prototype"), so a single constant is enough.
+SETTING_LINE = (
+    "A garden clearing by your home, beside a winding river, with forest, foothills, and misty mountains to the north."
+)
 
 
 def describe_inventory(counts: dict[str, int]) -> str:
@@ -286,10 +266,17 @@ def describe_vitals(health: float, fatigue: float, hunger: float) -> str:
     return f"health {health:.0f}/100, fatigue {fatigue:.0f}/100 ({fatigue_state}), hunger {hunger:.0f}/100 ({hunger_state})"
 
 
-# --- Situation-text assembly — same line order/shape as NpcAgent.BuildPerception()
+# --- Situation-text assembly ---------------------------------------------
+# Labeled sections, 2026-09-08, replacing the old flat list
+# of unlabeled lines (persona repeated, then heard/resources/home/firepit/
+# nearby/inventory/emotion/stats/vitals one after another with nothing
+# marking where one kind of information ends and the next begins). Same
+# underlying facts, same values — this only changes how they're grouped and
+# labeled, on the hypothesis that a 3B model tracks "ENVIRONMENT: ... /
+# NEARBY: ... / HEARD: ..." more reliably than an undifferentiated
+# paragraph of one-off sentences.
 
 def build_situation(
-    persona_line: str,
     heard_lines: list[str],
     resource_lines: list[str],
     home_dist: int, home_apples: int, home_fish: int,
@@ -299,31 +286,56 @@ def build_situation(
     stick_lines: list[str],
     inventory: dict[str, int],
     emotion: str,
-    stats_line: str,
     vitals: tuple[float, float, float],
     memory_line: str = "No notable memories yet.",
 ) -> str:
-    """Builds the same perception-text block BuildPerception() sends as the
-    user message — persona, what was just heard, nearby resources, home,
-    fire pit, nearby people, nearby animals, sticks on the ground,
-    inventory, emotion, stats, vitals, then the memory trail.
+    """User-message content: SETTING, ENVIRONMENT (resources/home/fire pit),
+    NEARBY (people/animals/sticks), MEMORY, YOU (inventory/emotion/vitals),
+    HEARD — in that order. Background/personality/stats live in the system
+    message instead (see persona_line()), not duplicated here. HEARD, not
+    PLAYER SAID — situation_for's own heard_speaker/is_player_speaker let
+    this same slot carry an overheard THIRD PARTY's line (the ambient
+    third-party-overheard scenarios below), where "player said" would be
+    flatly false.
     """
-    lines = [persona_line, *heard_lines, *resource_lines]
-    lines.append(f"home: {home_dist} px away, {home_apples} apples and {home_fish} fish stored there so far")
-    lines.append(
+    sections = [f"SETTING: {SETTING_LINE}"]
+
+    # Resource lines (trees/fish/pine/berry) sit under ENVIRONMENT, NOT
+    # merged into NEARBY's budgeted people/animal/stick pool — reverted
+    # 2026-09-08, the same day as the ENVIRONMENT/NEARBY split itself: an
+    # earlier version of this function DID put them under NEARBY (matching
+    # NpcAgent.BuildPerception()'s own PRE-EXISTING merge, which shared one
+    # budget across all seven categories), and a live A/B run of that
+    # exact change measured pick_apple recall crash from a consistent
+    # 66-83% (four separate prior runs) to 8.3% — a real, reproducible
+    # regression, not sampling noise. Ported the OTHER direction instead:
+    # NpcAgent.BuildPerception() itself changed to match THIS shape (see
+    # its own comment), a deliberate real-game behavior change motivated
+    # by this measurement, not a training-scaffold shortcut.
+    env_lines = [*resource_lines]
+    env_lines.append(f"home: {home_dist} px away, {home_apples} apples and {home_fish} fish stored there so far")
+    env_lines.append(
         f"fire pit: {firepit_dist} px away, near home, burning right now — a stick can be lit from it to make a torch, and raw rabbit meat can be cooked over it."
         if firepit_lit else
         f"fire pit: {firepit_dist} px away, near home, not lit right now — nothing is needed to light it, no stick or fuel or anything else required, just walk up and light it with the light_fire action whenever you want a fire going."
     )
-    lines.extend(nearby_npc_lines)
-    lines.extend(animal_lines)
-    lines.extend(stick_lines)
+    sections.append("ENVIRONMENT:\n" + "\n".join(env_lines))
+
+    nearby_lines = [*nearby_npc_lines, *animal_lines, *stick_lines]
+    if nearby_lines:
+        sections.append("NEARBY:\n" + "\n".join(nearby_lines))
+
+    sections.append(f"MEMORY: {memory_line}")
+
     health, fatigue, hunger = vitals
-    lines.append(f"You are carrying: {describe_inventory(inventory)}.")
-    lines.append(f"You are currently feeling {emotion}.")
-    lines.append(f"Your natural abilities: {stats_line}.")
-    lines.append(f"Your physical condition: {describe_vitals(health, fatigue, hunger)}.")
-    return "\n".join(lines) + f"\n\n{memory_line}"
+    sections.append(
+        f"YOU: carrying {describe_inventory(inventory)}; feeling {emotion}; {describe_vitals(health, fatigue, hunger)}"
+    )
+
+    if heard_lines:
+        sections.append("HEARD:\n" + "\n".join(heard_lines))
+
+    return "\n\n".join(sections)
 
 
 # --- Training example shape ------------------------------------------------
@@ -365,8 +377,18 @@ PROFILES = [
 
 
 def persona_line(profile) -> str:
-    name, backstory, o, c, e, a, n, _ = profile
-    return describe_personality(name, backstory, o, c, e, a, n)
+    """System-message content: BACKGROUND, PERSONALITY, STATS — the parts of
+    a character that don't change turn to turn, each its own labeled line
+    (see build_situation()'s own header for why this and the per-turn
+    situation text no longer duplicate persona between them).
+    """
+    name, backstory, o, c, e, a, n, stats_line = profile
+    background = f"You are {name}." + (f" {backstory}" if backstory else "")
+    return (
+        f"BACKGROUND: {background}\n"
+        f"PERSONALITY: {describe_personality_traits(o, c, e, a, n)}\n"
+        f"STATS: {stats_line}"
+    )
 
 
 def base_targets(**overrides) -> AvailableTargets:
@@ -382,7 +404,19 @@ def base_targets(**overrides) -> AvailableTargets:
         animal_ids=[],
         stick_ids=[],
         eat_allowed=False,
-        light_fire_allowed=False,
+        # True by default — matches the real invariant (NpcAgent:
+        # LightFireAllowed = !FirePit.IsLit) and situation_for's own
+        # default firepit_lit=False (make_torch_allowed/cook_meat_allowed
+        # both default False too): an unlit fire pit ALWAYS allows
+        # light_fire, no other gate on it. False was the default here
+        # until 2026-09-08 — every scenario that didn't explicitly need
+        # light_fire offered was quietly telling the model "light it
+        # whenever you want with light_fire" in the situation text while
+        # never actually putting light_fire in its tools list. Scenarios
+        # that want a LIT fire pit instead (make_torch_allowed=True or
+        # cook_meat_allowed=True) now need light_fire_allowed=False
+        # alongside that, explicitly — see those call sites.
+        light_fire_allowed=True,
         make_torch_allowed=False,
         cook_meat_allowed=False,
     )
@@ -394,6 +428,7 @@ def base_targets(**overrides) -> AvailableTargets:
 def situation_for(profile, targets: AvailableTargets, *, heard: str | None, inventory: dict,
                    emotion: str = "neutral", vitals: tuple[float, float, float] = (90.0, 70.0, 70.0),
                    heard_speaker: str = "Alex", is_player_speaker: bool = True, heard_lands: bool = True,
+                   witnessed: str | None = None,
                    extra_resource_lines: list[str] | None = None,
                    extra_stick_lines: list[str] | None = None, extra_animal_lines: list[str] | None = None,
                    extra_npc_lines: list[str] | None = None) -> str:
@@ -405,14 +440,22 @@ def situation_for(profile, targets: AvailableTargets, *, heard: str | None, inve
     from another NPC, and it doesn't land" (the real ambient failure from
     the logs — Maren hearing Finn's fire suggestion and brushing it off) as
     well as the direct-player-request case.
+
+    witnessed: a non-speech event this NPC saw (WorldEventLog.Witnessed,
+    e.g. "Finn picked an apple from tree_0") — merged into the same HEARD
+    slot as heard speech, "You just saw: {witnessed}" exactly matching
+    NpcAgent's own freshWitnessed line, since real BuildPerception() now
+    puts both under one HEARD section (see build_situation()'s own
+    header). Independent of `heard`: a turn can have either, both, or
+    neither.
     """
-    _, _, _, _, _, _, _, stats_line = profile
     hint = " (this comes across as pretty convincing to you)" if heard_lands else \
         " (this doesn't really land for you — easy to brush off if you're not already inclined to agree)"
     speaker_note = " (the real human player, not another character in this world)" if is_player_speaker else ""
     heard_lines = [f"{heard_speaker}{speaker_note} just said to you: \"{heard}\"{hint}"] if heard else []
+    if witnessed:
+        heard_lines.append(f"You just saw: {witnessed}")
     return build_situation(
-        persona_line=persona_line(profile),
         heard_lines=heard_lines,
         resource_lines=extra_resource_lines if extra_resource_lines is not None else [
             "tree_0 (apple tree): 140 px away, 3 apples ready to pick.",
@@ -425,7 +468,6 @@ def situation_for(profile, targets: AvailableTargets, *, heard: str | None, inve
         stick_lines=extra_stick_lines or [],
         inventory=inventory,
         emotion=emotion,
-        stats_line=stats_line,
         vitals=vitals,
     )
 

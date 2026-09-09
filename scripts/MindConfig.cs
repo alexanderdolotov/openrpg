@@ -11,6 +11,23 @@ using System.Text.Json.Serialization;
 public class MindConfig
 {
     [JsonPropertyName("provider")] public string Provider { get; set; } = "ollama"; // "ollama" | "openai_compatible"
+    // Prefer a bare IP over a .local hostname in mind.local.json if at
+    // all possible — confirmed directly on this dev machine
+    // (2026-09-08): "analytics.local" pays a real, reproducible ~5.1s
+    // tax on EVERY request. Root cause, confirmed with `host
+    // analytics.local` (not even an Ollama call): the OS resolver tries
+    // real DNS first, gets NXDOMAIN (.local isn't a real DNS domain,
+    // only mDNS/Bonjour knows it), and only falls back to mDNS after
+    // that failure — every single time, not just once per session.
+    // Since Mind.Decide() makes two sequential calls per NPC turn
+    // (think + act), that's ~10s of pure dead time per decision before
+    // any actual inference even starts, on top of everything else.
+    // Switching to the IP directly (see mind.local.json) cut a warm
+    // request from ~5.4s wall time down to ~0.4s, matching Ollama's own
+    // reported total_duration almost exactly. Only safe if the IP is
+    // actually static/reserved, not a floating DHCP lease — this default
+    // stays on the hostname since that's true for any given user's LAN,
+    // not this one specifically.
     [JsonPropertyName("base_url")] public string BaseUrl { get; set; } = "http://analytics.local:11434";
     [JsonPropertyName("model")] public string Model { get; set; } = "llama3.2:3b";
     [JsonPropertyName("api_key")] public string ApiKey { get; set; } = "";
@@ -55,13 +72,46 @@ public class MindConfig
     // degrades to unstructured rambling with no tool call at all in that
     // state — a real, reproduced cause of the exact "talks about it
     // instead of doing it" failure this session spent hours chasing as a
-    // pure model-capability problem. 8192 is a deliberate, generous-but-
-    // not-extreme choice — comfortably above what even a padded real
-    // prompt needs, while not doubling VRAM use more than necessary on a
-    // modest GPU box. Lower this if the box can't fit it (loading fails
-    // or evicts) — check via `curl http://<host>:11434/api/ps` after a
-    // restart to confirm the loaded context_length actually matches.
-    [JsonPropertyName("num_ctx")] public int NumCtx { get; set; } = 8192;
+    // pure model-capability problem.
+    //
+    // First tried 8192 (a straight doubling), but that overflowed the
+    // 8GB card's VRAM on analytics.local — `ollama ps` showed it split
+    // 22%/78% CPU/GPU instead of 100% GPU, which makes every single NPC
+    // decision dramatically slower (CPU-offloaded inference is routinely
+    // 5-20x slower than fully-resident GPU). Binary-searching purely for
+    // "does ONE request fit in VRAM" found 5632 (comfortably under the
+    // measured 5888/6016 single-request tipping point) — but that
+    // question turned out to be the wrong one for a multi-NPC game.
+    //
+    // Tested 3 and 4 truly CONCURRENT requests directly (2026-09-08,
+    // this is exactly what LlmRequestQueue's own header describes): at
+    // num_ctx=5632, 3 concurrent calls took 38s total to all finish —
+    // Ollama was serializing them, not batching them, despite VRAM
+    // being fine. At num_ctx=4096, both 3 and 4 concurrent calls
+    // finished in ~3-4s total — genuinely parallel, because a smaller
+    // per-slot KV-cache reservation leaves room for multiple slots at
+    // once. The single-request VRAM ceiling and the concurrent-serving
+    // ceiling are two different numbers, and the second one is far more
+    // relevant here (see GameSettings.MaxConcurrentLlmRequests). Also
+    // confirmed directly against the actual generated training data
+    // (llm_tuning/data/train.jsonl) that real content genuinely fits:
+    // the single largest real example (most tools offered, longest
+    // situation) measured 2976 real tokens via prompt_eval_count —
+    // comfortably under 4096 with ~27% headroom, not a tight squeeze.
+    // 4096 is thus strictly better than 5632 for this game: same VRAM
+    // safety, dramatically better concurrency, still enough room for
+    // content. This is specific to analytics.local's actual free VRAM
+    // and OLLAMA_NUM_PARALLEL behavior at the time it was measured —
+    // if either ever changes (another process using VRAM, a bigger
+    // model, more NPCs than this was tested with), re-run the same
+    // "fire N concurrent requests, time the total" test from
+    // LlmRequestQueue's own header rather than assuming this number
+    // still holds.
+    [JsonPropertyName("num_ctx")] public int NumCtx { get; set; } = 4096;
+
+    // See GameSettings.MaxConcurrentLlmRequests / LlmRequestQueue for
+    // what this actually gates.
+    [JsonPropertyName("max_concurrent_llm_requests")] public int MaxConcurrentLlmRequests { get; set; } = 4;
 
     private const string ConfigPath = "mind.local.json";
 
@@ -92,6 +142,63 @@ public class MindConfig
         return config;
     }
 
+    // The Settings panel's Ollama-address field is the one thing in
+    // here meant to be changed from inside the game rather than by
+    // hand-editing the file — this is what makes that change stick
+    // across a restart (see Main.BuildSettingsMenu). Deliberately does
+    // NOT just serialize `this` as-is: if MIND_API_KEY is set, Load()
+    // above already overwrote this object's own ApiKey with it in
+    // memory (exactly so a live secret never needs to live in the
+    // file) — blindly saving `this` back out would defeat that by
+    // writing the env var's own secret INTO the file the next time
+    // anyone touches an unrelated setting. Only ApiKey gets this
+    // special handling; every other field just round-trips normally.
+    // Returns whether the write actually succeeded — this project lives
+    // in a OneDrive-synced folder (see this codebase's own build
+    // history for prior transient file-read/build glitches from that),
+    // so a momentary lock or sync conflict on mind.local.json here is a
+    // real possibility, not just a hypothetical. Load() above already
+    // swallows exactly this class of I/O failure and falls back to
+    // defaults; Save() does the same rather than letting the exception
+    // propagate into whatever UI handler called it (see
+    // Main.BuildSettingsMenu's restart button — Save() runs before the
+    // unpause/reload, so an uncaught exception here would leave the
+    // player stuck on a frozen, paused screen instead of just losing
+    // the one setting change).
+    public bool Save()
+    {
+        string envKey = Environment.GetEnvironmentVariable("MIND_API_KEY");
+        bool apiKeyCameFromEnv = !string.IsNullOrEmpty(envKey) && ApiKey == envKey;
+        var snapshot = new MindConfig
+        {
+            Provider = Provider, BaseUrl = BaseUrl, Model = Model,
+            ApiKey = apiKeyCameFromEnv ? "" : ApiKey,
+            LogNpcThoughts = LogNpcThoughts, PureLlmMode = PureLlmMode,
+            PermadeathEnabled = PermadeathEnabled, LogLevel = LogLevel,
+            NumCtx = NumCtx, MaxConcurrentLlmRequests = MaxConcurrentLlmRequests,
+        };
+        try
+        {
+            var options = new JsonSerializerOptions { WriteIndented = true };
+            File.WriteAllText(ConfigPath, JsonSerializer.Serialize(snapshot, options));
+            return true;
+        }
+        catch (Exception)
+        {
+            return false;
+        }
+    }
+
+    // Every NPC still gets its own provider instance — see NpcAgent.
+    // Initialize()'s own AddChild((Node)provider): both providers are
+    // real Godot Nodes (they each own an HttpRequest child), not just
+    // ILlmProvider implementations, so a plain-class decorator can't
+    // wrap one here the way QueuedLlmProvider first tried to — that
+    // broke NpcFactory.Create's own Node cast outright. LlmRequestQueue
+    // gating instead lives INSIDE each provider's own Chat() (see
+    // OllamaProvider/OpenAiCompatibleProvider), so every instance still
+    // funnels through the one shared queue without needing to itself be
+    // wrapped in anything.
     public ILlmProvider CreateProvider()
     {
         if (Provider == "openai_compatible")

@@ -26,7 +26,13 @@ public partial class OpenAiCompatibleProvider : Node, ILlmProvider
         AddChild(_request);
     }
 
-    public async Task<ChatResult> Chat(object[] messages, object[] tools, float temperature = 0.7f)
+    // Gated through LlmRequestQueue — same shared throttle OllamaProvider
+    // routes through, so a cloud backend and a local one never both
+    // bypass it just because they're different provider classes.
+    public Task<ChatResult> Chat(object[] messages, object[] tools, float temperature = 0.7f) =>
+        LlmRequestQueue.Enqueue(() => ChatInternal(messages, tools, temperature));
+
+    private async Task<ChatResult> ChatInternal(object[] messages, object[] tools, float temperature)
     {
         var bodyObj = new Dictionary<string, object>
         {

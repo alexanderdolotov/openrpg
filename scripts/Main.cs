@@ -195,6 +195,7 @@ public partial class Main : Node2D
         WorldExploration.Reset();
         SpeechLog.Reset();
         WorldEventLog.Reset();
+        LlmRequestQueue.Reset();
 
         BuildWorld();
         BuildLighting();
@@ -209,6 +210,7 @@ public partial class Main : Node2D
         MindConfig config = MindConfig.Load();
         GameSettings.PermadeathEnabled = config.PermadeathEnabled;
         GameSettings.LogLevel = config.LogLevel;
+        GameSettings.MaxConcurrentLlmRequests = config.MaxConcurrentLlmRequests;
         _thoughtLog = new NpcThoughtLogger(config.LogNpcThoughts);
         Log($"backend: {config.Provider} ({config.Model})" +
             (config.PureLlmMode ? " [pure LLM mode]" : "") +
@@ -1396,6 +1398,7 @@ public partial class Main : Node2D
         var settingsButton = GetNode<Button>("UI/SettingsButton");
         var panel = GetNode<PanelContainer>("UI/SettingsPanel");
         var vitalsBarsCheck = GetNode<CheckBox>("UI/SettingsPanel/Margin/VBox/VitalsBarsCheck");
+        var ollamaAddressEdit = GetNode<LineEdit>("UI/SettingsPanel/Margin/VBox/OllamaAddressEdit");
         var restartButton = GetNode<Button>("UI/SettingsPanel/Margin/VBox/RestartButton");
         var exitButton = GetNode<Button>("UI/SettingsPanel/Margin/VBox/ExitButton");
         var closeButton = GetNode<Button>("UI/SettingsPanel/Margin/VBox/CloseButton");
@@ -1418,6 +1421,19 @@ public partial class Main : Node2D
 
         vitalsBarsCheck.ButtonPressed = GameSettings.ShowVitalsBars;
 
+        // A fresh Load() here rather than threading the boot-time config
+        // through as a field — this panel only ever needs it to
+        // pre-fill/persist the address field, and it's cheap enough
+        // (a small local JSON read) to just re-read on demand rather
+        // than keep a second copy of config state alive for the whole
+        // session. Every NPC's own provider was already built from
+        // whatever this file said at boot (see NpcFactory.Create) —
+        // editing the address here only takes effect once Restart Game
+        // actually reloads the scene and rebuilds them, same as every
+        // other setting in this panel that needs one.
+        MindConfig ollamaConfig = MindConfig.Load();
+        ollamaAddressEdit.Text = ollamaConfig.BaseUrl;
+
         settingsButton.Pressed += () => panel.Visible = !panel.Visible;
         closeButton.Pressed += () => panel.Visible = false;
         vitalsBarsCheck.Toggled += pressed => GameSettings.ShowVitalsBars = pressed;
@@ -1431,6 +1447,13 @@ public partial class Main : Node2D
         // still paused).
         restartButton.Pressed += () =>
         {
+            string newAddress = ollamaAddressEdit.Text.Trim();
+            if (newAddress != "" && newAddress != ollamaConfig.BaseUrl)
+            {
+                ollamaConfig.BaseUrl = newAddress;
+                if (!ollamaConfig.Save())
+                    Log("Couldn't save the new Ollama address to mind.local.json — restarting anyway, but it'll revert next launch.", "e0876b");
+            }
             GetTree().Paused = false;
             _thoughtLog?.Close();
             GetTree().ReloadCurrentScene();

@@ -134,7 +134,9 @@ def main():
         per_device_train_batch_size=2,   # 8GB card + 3B/4bit at 4096 seq_length — drop to 1 first if this OOMs, raise if there's headroom
         gradient_accumulation_steps=8,   # effective batch 16
         num_train_epochs=3,              # small, narrow-behavior dataset — watch val loss, cut short if it turns up
-        learning_rate=2e-4,
+        per_device_eval_batch_size=1,    # <--- ADD THIS
+        eval_accumulation_steps=1,
+        learning_rate=2e-5,
         logging_steps=5,
         eval_strategy="steps",
         eval_steps=20,
@@ -161,7 +163,8 @@ def main():
     model.save_pretrained(str(adapter_dir))
     tokenizer.save_pretrained(str(adapter_dir))
     print(f"\nsaved LoRA adapter -> {adapter_dir}")
-    print("next: 5_export_and_eval.py (GGUF export + ollama create + held-out eval) — not built yet, see README.md")
+    print("next: 6_export_to_ollama.py (GGUF export + ollama create), then re-run 5_baseline_eval.py")
+    print(f"      --model {MODEL_MAP[MODEL_KEY]['ollama_tuned_tag']} to compare against the base model")
 
 
 if __name__ == "__main__":

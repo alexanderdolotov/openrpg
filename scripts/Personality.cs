@@ -34,7 +34,15 @@ public class Personality
             Word(Neuroticism, "even-tempered", "occasionally anxious", "easily rattled"),
         };
 
+        // Labeled BACKGROUND/PERSONALITY lines (2026-09-08, ported from
+        // llm_tuning/common.py's persona_line() after that clean-prompt
+        // rewrite validated at least as well as the old single dense
+        // sentence — see Mind.ActInstruction's own header). Mind.Decide/
+        // DecidePlayerRequest append a third STATS line after this same
+        // string; Personality itself still doesn't know about
+        // CharacterStats (see this class's own header on why that stays a
+        // separate concern), so it isn't assembled here.
         string backstoryLine = string.IsNullOrEmpty(Backstory) ? "" : $" {Backstory}";
-        return $"You are {Name}.{backstoryLine} Your personality: {string.Join(", ", traits)}.";
+        return $"BACKGROUND: You are {Name}.{backstoryLine}\nPERSONALITY: {string.Join(", ", traits)}";
     }
 }

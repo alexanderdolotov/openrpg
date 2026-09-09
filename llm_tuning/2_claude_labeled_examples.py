@@ -81,7 +81,7 @@ pr(FINN, base_targets(light_fire_allowed=True), "would be nice to have a fire go
    {"name": "light_fire", "arguments": {"emotion": "neutral"}},
    ["request", "light_fire", "compound_phrasing"])
 
-pr(MAREN, base_targets(make_torch_allowed=True, carried_items=["stick"]),
+pr(MAREN, base_targets(make_torch_allowed=True, light_fire_allowed=False, carried_items=["stick"]),
    "you should really make yourself a torch before it gets dark", {"stick": 1},
    {"name": "make_torch", "arguments": {"emotion": "neutral"}},
    ["request", "make_torch", "indirect_phrasing"])
@@ -201,6 +201,68 @@ amb(FINN, base_targets(stick_ids=["stick_0"]),
     response={"name": "pick_up_stick", "arguments": {"target_id": "stick_0", "emotion": "neutral"}},
     tags=["ambient", "pick_up_stick", "self_initiated"],
     extra_stick_lines=["stick_0 (stick): 110 px away, lying on the ground."])
+
+
+# ---------------------------------------------------------------------------
+# Compound QUESTION + REQUEST in one line — a different pairing than stage
+# 1's apples/pinecones case, and a harder one: the request half here is
+# itself NOT available (no animal nearby), so the honest answer has to be
+# a decline, same "request wins the turn" rule PLAYER_REQUEST_INSTRUCTION's
+# own compound clause states, just landing on speak instead of a tool
+# because THIS request specifically can't be done right now either way.
+# ---------------------------------------------------------------------------
+
+pr(FINN, base_targets(), "how much health do you have? can you help me fight this wolf?", {},
+   {"name": "speak", "arguments": {"message": "I'm at 90 health, in good shape — but I don't see any wolf here to fight.", "emotion": "neutral"}},
+   ["request", "compound_reasoning", "attack", "not_available"])
+
+pr(WREN, base_targets(nearby_npc_names=["Alex", "Maren"]),
+   "are you carrying any sticks? give one to Maren if you've got one",
+   {"stick": 1},
+   {"name": "trade", "arguments": {"target_id": "Maren", "item": "stick", "amount": 1, "emotion": "neutral"}},
+   ["request", "compound_reasoning", "trade"],
+   extra_npc_lines=["Alex is nearby, 90 px away, feeling neutral.", "Maren is nearby, 140 px away, feeling neutral."])
+
+# ---------------------------------------------------------------------------
+# More real, casual phrasing for actions that only ever got their original,
+# narrower phrase set — same "people don't type clean commands" bet as the
+# pick_up_stick block above, spread across underrepresented actions.
+# ---------------------------------------------------------------------------
+
+pr(MAREN, base_targets(berry_bush_ids=["berry_0"]), "berries look ripe over there, wanna grab some?", {},
+   {"name": "gather_berry", "arguments": {"target_id": "berry_0", "emotion": "neutral"}},
+   ["request", "gather_berry", "casual_phrasing"],
+   extra_resource_lines=["berry_0 (berry bush): 100 px away, 4 berries ready to pick."])
+
+pr(BRAM, base_targets(pine_tree_ids=["pine_0"]), "pinecones everywhere, might as well collect a few", {},
+   {"name": "gather_pinecone", "arguments": {"target_id": "pine_0", "emotion": "neutral"}},
+   ["request", "gather_pinecone", "casual_phrasing"],
+   extra_resource_lines=["pine_0 (pine tree): 110 px away, 3 pinecones ready to gather."])
+
+pr(FINN, base_targets(make_torch_allowed=True, light_fire_allowed=False), "since the fire's going, cook up that meat you got", {"rabbit_meat": 1},
+   {"name": "cook_meat", "arguments": {"emotion": "neutral"}},
+   ["request", "cook_meat", "casual_phrasing"])
+
+pr(WREN, base_targets(), "getting dark out here, could really use a torch", {"stick": 1},
+   {"name": "speak", "arguments": {"message": "I'd need the fire pit lit first — nothing's burning right now.", "emotion": "neutral"}},
+   ["request", "make_torch", "indirect_phrasing", "not_available"])
+
+
+# ---------------------------------------------------------------------------
+# WITNESSED — the other half of freshHeard/freshWitnessed's shared HEARD
+# section (see situation_for's own witnessed= param header). "What others
+# are DOING" gets the same prominent placement "what others are SAYING"
+# already had; this was previously untested — no example anywhere in this
+# dataset exercised a "You just saw: ..." line at all.
+# ---------------------------------------------------------------------------
+
+amb(BRAM, base_targets(berry_bush_ids=["berry_0"]),
+    witnessed="Finn just caught a fish at fish_0.",
+    plan="Finn's already got fish covered — I'll go pick berries instead so we're not doubling up.",
+    inventory={},
+    response={"name": "gather_berry", "arguments": {"target_id": "berry_0", "emotion": "neutral"}},
+    tags=["ambient", "gather_berry", "witnessed"],
+    extra_resource_lines=["berry_0 (berry bush): 150 px away, 3 berries ready to pick."])
 
 
 def main():
