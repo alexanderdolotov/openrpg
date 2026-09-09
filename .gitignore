@@ -14,3 +14,5 @@ export_presets.cfg
 bin/
 obj/
 *.csproj.user
+
+.DS_Store
