@@ -5,11 +5,28 @@ scripted AI. Each NPC gets a personality and a "mind" that decides what
 to do turn by turn — gather food, talk, trade, follow, steal, fight,
 sleep — while a plain game-engine layer handles the actual walking,
 range checks, and dice rolls. You control one character yourself
-alongside them, through the exact same action system.
+alongside them, through the exact same action system everyone else
+uses — no special player-only verbs.
 
-No art assets — everything on screen is drawn in code (circles,
-rectangles, simple shapes) plus a small tileset (see
-[assets/CREDITS.md](assets/CREDITS.md)).
+![The garden, mid-session — apple and pine trees, a fire pit, a wolf stalking a rabbit off to the right, and the player typing a message to Finn while the scrolling world/thought log runs underneath](screenshots/conversation-prompt.png)
+
+Concretely, each NPC's turn works like this: the game hands the LLM a
+plain-text description of what that character can currently see, hear,
+and remember, plus their own personality/backstory, then asks it to
+pick one tool call from a menu built from what's actually true right
+now (only `pick_apple` if an apple tree is actually in sight, only
+`follow` if there's someone to follow). The response comes back as
+structured tool-call JSON — an action id and a target id, never raw
+coordinates — which a separate, ordinary game-engine layer then carries
+out: walk over, check range, roll the dice, report what happened. The
+model never controls movement or physics directly, and it can't
+reference something that doesn't exist in the world; it only ever
+chooses among real, currently-available options.
+
+**Art**: a small Kenney (CC0) tileset and character sheet — see
+[assets/CREDITS.md](assets/CREDITS.md) for exactly which packs and how
+they were cropped. Everything else on screen (UI panels, the action
+menu, health/fatigue bars) is still drawn in code.
 
 **What's in the world right now:**
 
@@ -21,6 +38,51 @@ rectangles, simple shapes) plus a small tileset (see
 - A memory system so NPCs remember what they've done and heard, and
   summarize it once it gets long
 - A procedurally-growing map — new areas appear as characters explore
+
+**Current state**: playable and stable — you can walk around, talk to
+NPCs, and watch them gather, trade, fight wildlife, and react to what
+you say, all driven live by a local model (`llama3.2:3b` via Ollama by
+default; see [Using a different LLM backend](#using-a-different-llm-backend)
+for cloud options). This is a prototype, not a finished game: there's no
+win condition, no quest system, and no content beyond one garden map
+that grows as characters explore it. The active work right now is less
+about adding new systems and more about making the NPCs *good* at the
+one they already have — getting a 3B local model to reliably call the
+right tool, stay honest about what it can't currently do (declining a
+request instead of quietly substituting an unrelated action), and stay
+consistent with its own stated personality and backstory. `llm_tuning/`
+(a self-contained LoRA fine-tuning pipeline) and the prompt design in
+`scripts/Mind.cs` are both aimed squarely at that problem — see
+[Fine-tuning the NPC model](#fine-tuning-the-npc-model) below and
+[llm_tuning/finetune_results.md](llm_tuning/finetune_results.md) for
+where that stands.
+
+**Why build a game this way**: most game AI is a state machine or a
+behavior tree — predictable by design, which is usually the right call,
+but it means every NPC reaction has to be anticipated and authored by
+hand ahead of time. Routing NPC decisions through an LLM instead flips
+that: characters can react to things nobody explicitly scripted (a
+player's free-typed request, an odd combination of what's nearby right
+now), using nothing but a personality description and a list of what's
+actually true in the moment. In the screenshot below, the player asks
+Finn a compound question — how many fish he's caught, plus a suggestion
+to go pick apples instead — nothing about that exact phrasing was ever
+authored anywhere; Finn answers both parts honestly (he hasn't caught
+any yet) and goes along with the suggestion, in his own voice:
+
+![Finn responding to a player's compound question mid-conversation, with the message "I didn't catch any fish yet, but I'm happy to try again. How about we just stick with picking apples for now?" visible in the log](screenshots/npc-conversation.png)
+
+That's also exactly what makes it
+interesting to *develop*, not just play — the bugs aren't "this
+variable is wrong," they're "this NPC gave a technically-valid answer
+that contradicts who they're supposed to be," which turns building the
+game into an ongoing, genuinely open question (prompt wording, context
+size, which facts the model even gets told, fine-tuning vs. better
+instructions) rather than a fixed spec being filled in. The mind/engine
+split is what makes that safe to experiment with — the LLM only ever
+picks from a validated menu of real actions, so a wrong or malformed
+answer is a handled failure (fall back to a sane default, log why),
+never a crash or an exploit.
 
 For the reasoning behind how any of this is built, see
 [DEVELOPMENT_LOG.md](DEVELOPMENT_LOG.md).
@@ -100,6 +162,7 @@ again.
 | `scripts/` | All C# game code — engine layer, LLM integration, world objects |
 | `scenes/` | Godot scenes (`Main.tscn`, `StartScreen.tscn`, etc.) |
 | `assets/` | Art/tileset, with sourcing in `CREDITS.md` |
+| `screenshots/` | Screenshots used in this README |
 | `diagnostics/` | Small GDScript scripts used ad hoc while debugging specific issues |
 | `llm_tuning/` | A separate pipeline for fine-tuning the local model — see its own [README](llm_tuning/README.md) |
 | `npcs.json` / `personality_archetypes.json` | NPC roster and personality traits — edit these to add or tweak NPCs without touching code |
