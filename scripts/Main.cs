@@ -103,6 +103,7 @@ public partial class Main : Node2D
     private FirePit _firePit;
     private RichTextLabel _debugLog;
     private NpcThoughtLogger _thoughtLog;
+    private PanelContainer _settingsPanel;
 
     // The player's own reference — needed for RefreshNpcFilterBar's
     // "who's actually near ME" distance check below. Everything else
@@ -1382,6 +1383,17 @@ public partial class Main : Node2D
             TogglePause();
             GetViewport().SetInputAsHandled();
         }
+        // Escape toggles the Settings panel, same as most games use it
+        // for their pause/options menu — hardcoded like Space above
+        // rather than routed through the Input Map, for the same reason.
+        // Doesn't touch GetTree().Paused itself: BuildSettingsMenu's own
+        // comment already covers why the panel deliberately doesn't
+        // auto-pause on open.
+        else if (@event is InputEventKey { Pressed: true, Echo: false, Keycode: Key.Escape } && _settingsPanel != null)
+        {
+            _settingsPanel.Visible = !_settingsPanel.Visible;
+            GetViewport().SetInputAsHandled();
+        }
     }
 
     private void TogglePause()
@@ -1401,6 +1413,7 @@ public partial class Main : Node2D
     {
         var settingsButton = GetNode<Button>("UI/SettingsButton");
         var panel = GetNode<PanelContainer>("UI/SettingsPanel");
+        _settingsPanel = panel;
         var vitalsBarsCheck = GetNode<CheckBox>("UI/SettingsPanel/Margin/VBox/VitalsBarsCheck");
         var ollamaAddressEdit = GetNode<LineEdit>("UI/SettingsPanel/Margin/VBox/OllamaAddressEdit");
         var restartButton = GetNode<Button>("UI/SettingsPanel/Margin/VBox/RestartButton");

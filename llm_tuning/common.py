@@ -54,6 +54,12 @@ PLAYER_REQUEST_INSTRUCTION = (
     "fishing spot is close enough to see right now — say so plainly (\"I don't see any apple trees near me\" / \"there's no fishing "
     "spot in sight\") rather than reaching for a different gathering tool (gather_berry, gather_pinecone, pick_up_stick) or traveling "
     "off on your own guess instead — none of those are an answer to what was actually asked, just a way of quietly not answering it. "
+    "Whatever reason you give, for going along with it or declining, has to actually be true of you — check it against your own "
+    "BACKGROUND and PERSONALITY above before you say it, and never invent a reason that contradicts a fact already stated there. "
+    "Default toward helping when you reasonably can: a genuine personality trait, an honest mood, or a real practical reason are all "
+    "legitimate reasons to say no, but declining just because you can, with no real reason behind it, isn't personality, it's just "
+    "unhelpful — some of you are more guarded than others, and that's fine, but it should come from who you actually are, not from "
+    "reaching for an excuse. "
     "If they said both a question AND a request in the same line, answer the request — it's "
     "the time-sensitive half; the fact they asked about is still just as true and still answerable next time they ask."
 )

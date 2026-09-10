@@ -265,3 +265,57 @@ outside the training distribution. And within the distribution it does
 know, there's still real room: `cook_meat`/`light_fire`/`make_torch`/
 `pick_up_stick`/`trade` sit at 0/4 or 1/5 for *both* models — not a
 fine-tuning-vs-prompting question at all, just still-unsolved.
+
+# Backstory-grounding + collaborative-default instruction (2026-09-10)
+
+Motivated by a real gameplay log: Finn declined an apple-picking request
+with "Not my thing" despite his own `BACKGROUND` text stating he's
+"never turned down a good apple either" — a straight contradiction
+between the decline reason and a fact the prompt itself hands the model.
+Not the same failure as `not_available` tool-substitution (the
+`pick_apple` tool *was* offered here); this is a grounding/consistency
+gap.
+
+Fix, applied to `PlayerRequestInstruction` in `Mind.cs` (mirrored
+character-for-character into `common.PLAYER_REQUEST_INSTRUCTION`, see
+`llm_tuning/common.py`): two new sentences telling the model (a) to check
+any reason it gives, for going along with a request or declining it,
+against its own `BACKGROUND`/`PERSONALITY` and never invent one that
+contradicts a stated fact, and (b) to default toward helping when it
+reasonably can — framed explicitly as "a real reason to say no is fine,
+declining with no real reason isn't personality, it's just unhelpful."
+Deliberately did **not** touch `personality_archetypes.json` trait
+values — the goal was more honest, better-grounded declines, not
+flattening the intentional variety between e.g. `gruff_loner` (Bram) and
+`warm_socializer`/`easygoing_wanderer` (Maren/Finn).
+
+Re-ran the full 256-example set (`5_baseline_eval.py`, `--seed 42`)
+against `openrpg-npc_ep4a-llama3.2-3b:latest` with the new instruction in
+place, same dataset regeneration + character-for-character verification
++ `dotnet build` (0 errors) workflow as every other prompt change this
+session:
+
+| | overall | `not_available` |
+|---|---|---|
+| ep4a, old instruction (see head-to-head above) | 80.1% | 39.1% (18/46) |
+| ep4a, new instruction | 82.8% (212/256) | 50.0% (23/46) |
+
+Both figures move the right direction — overall +2.7pt, and
+`not_available` specifically +10.9pt, on top of a category that was
+already the weakest across every run this session. Remaining
+`not_available` misses cluster in one recognizable shape: the model
+substitutes a *plausible neighboring action* instead of declining —
+`light_fire`↔`make_torch` (4 misses), `cook_meat`→`make_torch` (3
+misses), `pick_up_stick`→`gather_pinecone` (2 misses) — action pairs
+that are conceptually adjacent (fire-related, gathering-related), not
+random noise. That looks like a distinct, narrower problem from the
+original "just travel/gather_berry as a catch-all" pattern this session
+started from, and a plausible next target if `not_available` gets
+revisited again.
+
+Caveat carried forward unchanged from the section above: this is still
+an eval against the same 46 `not_available` scenarios `ep4a` trained on,
+not a fresh generalization test. Have not yet re-run the vanilla
+(untuned) model against this new instruction — the head-to-head above
+used the previous wording, so a like-for-like vanilla comparison on the
+new instruction is still open if that comparison is ever needed again.
