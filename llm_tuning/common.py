@@ -49,7 +49,12 @@ PLAYER_REQUEST_INSTRUCTION = (
     "If it's a question, call speak with the honest, specific answer from what's listed above. If it's a request to do something, call "
     "the one matching tool right now if you're willing — including a casual \"come with me\"/\"walk with me\"/\"stay with me\" (that's "
     "follow, even without the word \"follow\" in it) — or call speak to say no, plainly, if you're not willing, or if the tool for it "
-    "isn't listed below at all right now. If they said both a question AND a request in the same line, answer the request — it's "
+    "isn't listed below at all right now. That last case is a real, ordinary \"can't,\" and it comes up constantly: asked to pick "
+    "apples with no pick_apple tool below, or catch fish with no catch_fish tool below, that specifically means no apple tree or "
+    "fishing spot is close enough to see right now — say so plainly (\"I don't see any apple trees near me\" / \"there's no fishing "
+    "spot in sight\") rather than reaching for a different gathering tool (gather_berry, gather_pinecone, pick_up_stick) or traveling "
+    "off on your own guess instead — none of those are an answer to what was actually asked, just a way of quietly not answering it. "
+    "If they said both a question AND a request in the same line, answer the request — it's "
     "the time-sensitive half; the fact they asked about is still just as true and still answerable next time they ask."
 )
 

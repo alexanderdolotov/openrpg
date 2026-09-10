@@ -1,1 +1,9 @@
-alias playrpg='"/Applications/Godot_mono.app/Contents/MacOS/Godot" --path "/Users/alexdolotov/Library/CloudStorage/OneDrive-Personal/Projects/games/openrpg"'
+# Optional: a shell alias for launching straight from the CLI instead of
+# opening the Godot editor and hitting Play. Swap in your own Godot binary
+# path and the path to this repo, then add the line to your shell profile
+# (~/.zshrc, ~/.bashrc, etc.):
+#
+# alias playrpg='"/path/to/Godot_mono.app/Contents/MacOS/Godot" --path "/path/to/openrpg"'
+#
+# alex's local alias:
+# alias playrpg='"/Applications/Godot_mono.app/Contents/MacOS/Godot" --path "/Users/alexdolotov/Library/CloudStorage/OneDrive-Personal/Projects/games/openrpg"'

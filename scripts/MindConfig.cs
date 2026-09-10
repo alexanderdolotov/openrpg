@@ -33,6 +33,20 @@ public class MindConfig
     [JsonPropertyName("api_key")] public string ApiKey { get; set; } = "";
     [JsonPropertyName("log_npc_thoughts")] public bool LogNpcThoughts { get; set; } = false;
 
+    // Off by default — the whole point of NpcThoughtLogger above is a
+    // readable, high-level "what happened" trail; this is the opposite,
+    // a low-level "what did we actually send and get back" trail for the
+    // specific job of comparing real in-game prompts against
+    // llm_tuning's own benchmarked ones (see PromptDebugLogger's own
+    // header — a real, motivating case: the deployed fine-tuned model
+    // wasn't visibly following instructions any better in actual
+    // gameplay despite a clean llm_tuning benchmark number, and there
+    // was no way to see the EXACT text a real turn sent without this).
+    // Verbose and PII-adjacent enough (full persona/situation/response
+    // text every turn) that it stays a separate opt-in from
+    // log_npc_thoughts, not folded into it.
+    [JsonPropertyName("debug_prompts")] public bool DebugPrompts { get; set; } = false;
+
     // When true, a genuinely UNREACHABLE backend (the network/provider
     // call itself failing) retries instead of ever substituting
     // RandomFallback() — every action taken under a live connection
@@ -128,9 +142,21 @@ public class MindConfig
                     config = loaded;
             }
         }
-        catch (Exception)
+        catch (Exception e)
         {
-            // malformed config file — run on defaults rather than crash
+            // Malformed config file — run on defaults rather than crash, but
+            // NOT silently: a real, reproduced case (2026-09-08) — a stray
+            // "//" comment line (invalid in standard JSON; System.Text.Json
+            // rejects it by default, unlike Newtonsoft or JSON5) made
+            // JsonSerializer.Deserialize throw, and this catch swallowed it
+            // completely, so mind.local.json's entire model/base_url/
+            // logging config silently reverted to hardcoded defaults with
+            // zero indication anything was wrong — indistinguishable from
+            // "the model just isn't following the new config" without
+            // actually reading this file's own JSON syntax by hand. GD.
+            // PrintErr (not GD.Print) so it stands out in the console the
+            // same way any other real startup problem would.
+            Godot.GD.PrintErr($"mind.local.json failed to parse ({e.Message}) — running on defaults instead of your config. Check its JSON syntax (no comments allowed).");
         }
 
         // An env var can carry the key instead, so mind.local.json (or
@@ -173,7 +199,7 @@ public class MindConfig
         {
             Provider = Provider, BaseUrl = BaseUrl, Model = Model,
             ApiKey = apiKeyCameFromEnv ? "" : ApiKey,
-            LogNpcThoughts = LogNpcThoughts, PureLlmMode = PureLlmMode,
+            LogNpcThoughts = LogNpcThoughts, DebugPrompts = DebugPrompts, PureLlmMode = PureLlmMode,
             PermadeathEnabled = PermadeathEnabled, LogLevel = LogLevel,
             NumCtx = NumCtx, MaxConcurrentLlmRequests = MaxConcurrentLlmRequests,
         };

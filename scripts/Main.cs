@@ -211,10 +211,13 @@ public partial class Main : Node2D
         GameSettings.PermadeathEnabled = config.PermadeathEnabled;
         GameSettings.LogLevel = config.LogLevel;
         GameSettings.MaxConcurrentLlmRequests = config.MaxConcurrentLlmRequests;
+        GameSettings.DebugPrompts = config.DebugPrompts;
+        PromptDebugLogger.Init(config.DebugPrompts);
         _thoughtLog = new NpcThoughtLogger(config.LogNpcThoughts);
         Log($"backend: {config.Provider} ({config.Model})" +
             (config.PureLlmMode ? " [pure LLM mode]" : "") +
-            (config.LogNpcThoughts ? $" [logging to {_thoughtLog.LogPath}]" : ""), "6f8068");
+            (config.LogNpcThoughts ? $" [logging to {_thoughtLog.LogPath}]" : "") +
+            (config.DebugPrompts ? " [debug_prompts on]" : ""), "6f8068");
         _thoughtLog.Log("*", "RUN_START", $"backend={config.Provider} model={config.Model} pure_llm_mode={config.PureLlmMode}");
 
         _world = new WorldContext { Trees = _trees, FishingSpots = _fishingSpots, PineTrees = _pineTrees, BerryBushes = _berryBushes, GrassPatches = _grassPatches, Sticks = _sticks, Home = _home, FirePit = _firePit, Flagpoles = _flagpoles, Agents = _agents, Animals = _animals };
@@ -292,6 +295,7 @@ public partial class Main : Node2D
     private void RestartGame()
     {
         _thoughtLog?.Close();
+        PromptDebugLogger.Close();
         GetTree().ReloadCurrentScene();
     }
 
@@ -1456,9 +1460,10 @@ public partial class Main : Node2D
             }
             GetTree().Paused = false;
             _thoughtLog?.Close();
+            PromptDebugLogger.Close();
             GetTree().ReloadCurrentScene();
         };
-        exitButton.Pressed += () => { _thoughtLog?.Close(); GetTree().Quit(); };
+        exitButton.Pressed += () => { _thoughtLog?.Close(); PromptDebugLogger.Close(); GetTree().Quit(); };
     }
 
     // Flushes/closes the NPC thought log's own kept-open file handle
@@ -1470,7 +1475,10 @@ public partial class Main : Node2D
     public override void _Notification(int what)
     {
         if (what == NotificationWMCloseRequest)
+        {
             _thoughtLog?.Close();
+            PromptDebugLogger.Close();
+        }
     }
 
     // AppendText(), not a full Text replace of a rebuilt _logLines join —

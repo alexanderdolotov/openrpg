@@ -49,4 +49,10 @@ public static class GameSettings
     // the total" test from LlmRequestQueue's own header before raising
     // this further, rather than assuming it scales for free.
     public static int MaxConcurrentLlmRequests = 4;
+
+    // Gates PromptDebugLogger.Log() — off by default, same "only read
+    // once at boot" shape as PermadeathEnabled above. See MindConfig.
+    // DebugPrompts' own header for why this exists as a separate,
+    // lower-level opt-in from LogLevel/NpcThoughtLogger.
+    public static bool DebugPrompts = false;
 }

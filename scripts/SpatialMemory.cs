@@ -18,7 +18,30 @@ using Godot;
 // of what any one NPC personally happens to have discovered.
 public class SpatialMemory
 {
-    public const float VisionRadius = 260f;
+    // 1000, not 260 — raised 2026-09-09 after a real prompt_debug session
+    // showed pick_apple/catch_fish never once offered across an entire
+    // play session (grepped every TOOLS OFFERED line — zero hits for
+    // either), and the player's own direct "let's catch some fish"/
+    // "let's collect apples" requests getting answered with an unrelated
+    // substitute tool instead of an honest decline, because neither was
+    // EVER actually in the menu, not because the model chose wrong. Root
+    // cause: 260 was tuned for a much smaller original village layout:
+    // the hand-placed apple trees sit 460-650px from home, the five
+    // river fishing spots span roughly 350-1450px from home, and
+    // misty_mountains — a landmark this same session's own logs treat as
+    // routinely relevant, not "far away" — showed up at 759-870px away.
+    // All of that used to be invisible from anywhere near home. 1000
+    // comfortably covers the trees and misty_mountains, and reaches
+    // several of the five fishing spots (deliberately not all — the
+    // farthest are genuinely far in this layout, and "everything is
+    // always in range" would undo the whole reason this radius exists:
+    // see NearestResourceLines' own header). This is a real, coarse
+    // value for this specific early-game world, not a principled
+    // constant — revisit again once exploration-driven growth
+    // (WorldExploration) makes the playable area meaningfully bigger
+    // than this village-and-mountains core, the same way 260 stopped
+    // fitting this one.
+    public const float VisionRadius = 1000f;
 
     private readonly HashSet<string> _known = new();
 

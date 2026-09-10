@@ -96,11 +96,23 @@ public class Mind
     // (the version actually benchmarked, including the "come with me"
     // follow-phrasing clause and the compound question+request rule
     // below) — port any future change there too, in the same commit.
+    // 2026-09-09: added a concrete, named example to the "tool not
+    // listed" clause after a real prompt_debug session (live gameplay,
+    // the deployed fine-tuned model, not eval-only) caught this exact
+    // substitution twice in one session — asked to catch fish with no
+    // catch_fish tool offered (no fishing spot in sight), Finn called
+    // travel and Maren called gather_berry instead of declining either
+    // time. This is the single weak spot that survived every prompt
+    // change tried this whole project (see llm_tuning/README.md's
+    // "Results so far") — the generic "or call speak... if the tool for
+    // it isn't listed" framing clearly isn't concrete enough on its own.
+    // Not expected to fully fix it (nothing has), but worth the cheap
+    // try before concluding this needs the fine-tune to carry the rest.
     private const string PlayerRequestInstruction =
-        "The player just spoke to you directly — see HEARD above. Answer them this turn with a real tool call, not just words. If it's a question, call speak with the honest, specific answer from what's listed above. If it's a request to do something, call the one matching tool right now if you're willing — including a casual \"come with me\"/\"walk with me\"/\"stay with me\" (that's follow, even without the word \"follow\" in it) — or call speak to say no, plainly, if you're not willing, or if the tool for it isn't listed below at all right now. If they said both a question AND a request in the same line, answer the request — it's the time-sensitive half; the fact they asked about is still just as true and still answerable next time they ask.";
+        "The player just spoke to you directly — see HEARD above. Answer them this turn with a real tool call, not just words. If it's a question, call speak with the honest, specific answer from what's listed above. If it's a request to do something, call the one matching tool right now if you're willing — including a casual \"come with me\"/\"walk with me\"/\"stay with me\" (that's follow, even without the word \"follow\" in it) — or call speak to say no, plainly, if you're not willing, or if the tool for it isn't listed below at all right now. That last case is a real, ordinary \"can't,\" and it comes up constantly: asked to pick apples with no pick_apple tool below, or catch fish with no catch_fish tool below, that specifically means no apple tree or fishing spot is close enough to see right now — say so plainly (\"I don't see any apple trees near me\" / \"there's no fishing spot in sight\") rather than reaching for a different gathering tool (gather_berry, gather_pinecone, pick_up_stick) or traveling off on your own guess instead — none of those are an answer to what was actually asked, just a way of quietly not answering it. If they said both a question AND a request in the same line, answer the request — it's the time-sensitive half; the fact they asked about is still just as true and still answerable next time they ask.";
 
     private const string SummarizeSystemPrompt =
-        "You are compressing an NPC's memory log into a short diary paragraph (3-5 sentences) they'll carry forward. Preserve what matters for future decisions — where they've been, what they've done, anything notable, and anything said aloud (by them or heard from someone else), including who said or asked for what by name. A repeated identical failure is NOT routine detail — it's the opposite: state plainly what failed, why, and how many times, so it isn't attempted again pointlessly. Drop only genuinely routine, non-repeated detail (a single successful wait, a normal walk). Write in first person, past tense.";
+        "You are compressing an NPC's memory log into a short diary paragraph (3-5 sentences) they'll carry forward. Preserve what matters for future decisions — where they've been, what they've done, anything notable, and anything said aloud (by them or heard from someone else), including who said or asked for what by name. A repeated identical failure is NOT routine detail — it's the opposite: state plainly what failed, why, and how many times, so it isn't attempted again pointlessly. Drop only genuinely routine, non-repeated detail (a single successful wait, a normal walk). Write in first person, past tense. Output ONLY the diary paragraph itself — no preamble like \"Here's my attempt to condense this...\", no closing note explaining what you kept or why. The reader is the NPC remembering their own day, not someone reviewing your summarization work.";
 
     private static readonly string[] ValidActions = { "pick_apple", "catch_fish", "gather_pinecone", "gather_berry", "deposit", "travel", "speak", "follow", "trade", "steal", "attack", "eat", "pick_up_stick", "sleep", "wait", "light_fire", "make_torch", "cook_meat" };
 
@@ -192,6 +204,7 @@ public class Mind
             new { role = "user", content = perceptionText },
         };
         ChatResult thinkResult = await _provider.Chat(thinkMessages, null, temperature);
+        PromptDebugLogger.Log(personality.Name, "think", $"{persona}\n\n{ThinkInstruction}", perceptionText, Array.Empty<string>(), thinkResult);
         if (!thinkResult.Ok)
             return MindResult.Fail($"think_{thinkResult.Error}");
 
@@ -217,6 +230,7 @@ public class Mind
         for (int attempt = 1; attempt <= maxActAttempts; attempt++)
         {
             actResult = await _provider.Chat(actMessages, tools, temperature);
+            PromptDebugLogger.Log(personality.Name, "act", $"{persona}\n\n{ActInstruction}", $"{perceptionText}\n\nYour plan: {thought}", ToolNames(tools), actResult);
             if (!actResult.Ok)
                 return MindResult.Fail($"act_{actResult.Error}", thought);
 
@@ -268,6 +282,7 @@ public class Mind
         object[] tools = BuildThreatTools();
 
         ChatResult result = await _provider.Chat(messages, tools, temperature);
+        PromptDebugLogger.Log(personality.Name, selfTargeted ? "threat_self" : "threat_ally", $"{persona}\n\n{instruction}", perceptionText, ToolNames(tools), result);
         if (!result.Ok)
             return ThreatResult.Fail($"act_{result.Error}");
 
@@ -329,6 +344,7 @@ public class Mind
         for (int attempt = 1; attempt <= maxAttempts; attempt++)
         {
             result = await _provider.Chat(messages, tools, temperature);
+            PromptDebugLogger.Log(personality.Name, "player_request", $"{persona}\n\n{PlayerRequestInstruction}", perceptionText, ToolNames(tools), result);
             if (!result.Ok)
                 return MindResult.Fail($"act_{result.Error}");
 
@@ -886,6 +902,17 @@ public class Mind
             _ => value.ToString(),
         };
     }
+
+    // PromptDebugLogger's own use only — the names of whatever BuildTools()/
+    // BuildThreatTools() just built, for a readable "TOOLS OFFERED" line
+    // without dumping the full schema on every logged turn (see that
+    // class's own header for why). `dynamic` here rather than a shared
+    // interface: the tools array is anonymous types built fresh in three
+    // different places (BuildTools, BuildThreatTools), and adding a real
+    // type just for this debug-only reflection would be more ceremony
+    // than the one-line accessor it replaces.
+    private static string[] ToolNames(object[] tools) =>
+        tools == null ? Array.Empty<string>() : tools.Select(t => (string)((dynamic)t).function.name).ToArray();
 
     private static object[] BuildTools(AvailableTargets targets)
     {
