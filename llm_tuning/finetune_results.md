@@ -85,3 +85,6 @@ speak                           0               0               0               
 
 # Discussion
 We can see best tool action finetuning results when training llama for 4 epochs with learning_rate=2e-5
+When the model was fit with a higher learning rate of 2e-4, after 3 epochs the validation collapsed to 20% accuracy... 
+Small nudges in the existing model can help tune it better to tool activation
+
