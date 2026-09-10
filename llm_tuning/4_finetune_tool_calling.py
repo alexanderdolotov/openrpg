@@ -133,7 +133,7 @@ def main():
         output_dir=str(OUTPUT_DIR),
         per_device_train_batch_size=2,   # 8GB card + 3B/4bit at 4096 seq_length — drop to 1 first if this OOMs, raise if there's headroom
         gradient_accumulation_steps=8,   # effective batch 16
-        num_train_epochs=3,              # small, narrow-behavior dataset — watch val loss, cut short if it turns up
+        num_train_epochs=5,              # small, narrow-behavior dataset — watch val loss, cut short if it turns up
         per_device_eval_batch_size=1,    # <--- ADD THIS
         eval_accumulation_steps=1,
         learning_rate=2e-5,

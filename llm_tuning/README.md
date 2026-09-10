@@ -216,4 +216,10 @@ models against just that — the real test of generalization vs.
 memorizing the 46 training examples.
 
 
+Quick Commands:
+ python 4_finetune_tool_calling.py 
+ python 6_export_to_ollama.py
+ ollama create openrpg-npc_ep5a-llama3.2-3b:latest -f /data/openrpg/llm_tuning/outputs/llama3.2-3b/gguf_gguf/Modelfile
+ 
+ python 5_baseline_eval.py --model openrpg-npc_ep5a-llama3.2-3b:latest --val-only  
 
