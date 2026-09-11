@@ -1841,6 +1841,17 @@ public partial class NpcAgent : Node, IWorldCharacter
 
         if (success && actionId == "speak")
         {
+            // See Mind.SanitizeSpokenMessage's own header for why this
+            // exists at all (a real case: Wren's spoken line came back
+            // as raw, slightly malformed tool-call JSON instead of
+            // prose). Cheap regex pass first, on every line; only falls
+            // through to an actual extra LLM call on the rare line that
+            // still looks broken afterward.
+            string clean = Mind.SanitizeSpokenMessage(message);
+            if (clean == null)
+                clean = await Mind.CleanUpBrokenSpeech(message);
+            message = clean;
+
             SpeechLog.Say(Personality.Name, Actor.GlobalPosition, message);
             Actor.ShowSpeechBubble();
             _uiLog($"[{Personality.Name}] says: \"{message}\"", "e8d9a9");

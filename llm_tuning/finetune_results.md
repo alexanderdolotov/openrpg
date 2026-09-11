@@ -319,3 +319,53 @@ not a fresh generalization test. Have not yet re-run the vanilla
 (untuned) model against this new instruction — the head-to-head above
 used the previous wording, so a like-for-like vanilla comparison on the
 new instruction is still open if that comparison is ever needed again.
+
+# Tightening "declining needs a real reason" further (2026-09-10, later same day)
+
+Motivated by a real 3-NPC gameplay log: asked twice to go pick apples,
+only Finn ever attempted it (succeeding once in three tries — the other
+two were dexterity fumbles, not refusals); Maren and Wren both just
+never engaged with the request at all — no explicit "no," just an
+unrelated reply (a rabbit-meat tangent, wanting quiet) that never
+answered it either way. The section above's own comment had explicitly
+signed off on Maren declining this exact kind of request with "I'd like
+some quiet time" as *correct*, since it was genuinely grounded in her
+BACKGROUND/PERSONALITY. The live log showed why that bar was still too
+low in practice: almost every character has *some* standing trait or
+mood they can invoke against literally any request, which turns "a
+genuine personality trait is a legitimate reason to say no" into a
+blanket excuse rather than the occasional, meaningful refusal it was
+meant to allow.
+
+Tightened `PlayerRequestInstruction` further: a general trait/mood now
+has to flavor *how* a character goes along with an easy, low-cost ask,
+not license skipping it outright — a real refusal needs something
+concretely true *this turn* (mid-task, hurt, in danger, an active
+conflict), not a standing preference. Also added an explicit call-out
+for the exact failure mode the log showed: replying with something
+unrelated, never actually answering the request either way, now counts
+as a non-answer, same as silently not calling a tool at all.
+
+Re-ran the full 256-example set against `ep4a`:
+
+| | overall | `pick_apple` recall | `not_available` |
+|---|---|---|---|
+| previous instruction (section above) | 82.8% (212/256) | 83.3% (10/12) | 50.0% (23/46) |
+| this instruction | 81.2% (208/256) | **100% (12/12)** | 37.0% (17/46) |
+
+Real trade-off, not a clean win: `pick_apple` compliance hit 100%, which
+is the specific behavior this pass targeted — but `not_available`
+dropped to *below* where this whole session started (39.1%), with the
+old substitution failure mode back (`light_fire`↔`make_torch`,
+`trade`→`pick_apple`) instead of an honest decline. A more surgical
+wording that re-anchored the new "default toward yes" language to only
+the tool-IS-available case was drafted and tested in isolation, but not
+adopted — explicit call on this: an NPC world where more characters are
+doing things (agreeable, lively, reactive to the player) matters more
+here than maximizing how often an NPC correctly says "I can't do that"
+when a tool genuinely isn't available. Substituting a nearby action
+instead of declining reads as *more* game happening, not as a bug, for
+this project's actual goals. If `not_available` accuracy becomes a
+problem again (e.g. NPCs inventing physically nonsensical actions, not
+just adjacent-tool substitutions), that's worth revisiting on its own
+terms — but it's a deliberate trade being made here, not an oversight.

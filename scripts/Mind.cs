@@ -127,8 +127,42 @@ public class Mind
     // agreeableness, guarded) should still say no more often than Maren
     // or Finn; that contrast is the actual personality variety this
     // project wants, not something to flatten.
+    //
+    // 2026-09-10, later same day: that fix's own comment above signed
+    // off on Maren declining "let's pick some apples" with "I'd like
+    // some quiet time" as correct — genuinely consistent with her
+    // BACKGROUND/PERSONALITY, so it passed the new bar. A live 3-NPC
+    // session right after showed why that bar was still too low: asked
+    // twice to go pick apples, only Finn ever attempted it (succeeding
+    // once in three tries — the other two were dice fumbles, not
+    // refusals); Maren and Wren both just... didn't — no explicit
+    // refusal either, just an unrelated reply (rabbit meat, wanting
+    // quiet) that never engaged with the ask at all. The problem: almost
+    // every character has SOME standing trait or mood they can invoke
+    // against literally any request ("I'd rather be doing my own
+    // thing"), which makes "a genuine personality trait is a legitimate
+    // reason to say no" a blanket excuse in practice, not the occasional,
+    // meaningful refusal it was meant to allow. Tightened below: a
+    // general trait/mood now has to flavor HOW a character goes along
+    // with an easy, low-cost ask, not license skipping it — a real "no"
+    // needs something concretely true this turn, not a standing
+    // preference. Also added an explicit call-out for the exact failure
+    // mode this session showed (replying about something else entirely,
+    // never actually answering the request either way).
+    //
+    // 2026-09-10, n=256 benchmark on this version: pick_apple recall hit
+    // 12/12 (100%, up from 10/12) — the actual bug this pass targeted —
+    // at the cost of not_available dropping 50.0%->37.0% (the model
+    // substitutes a nearby tool, e.g. light_fire<->make_torch, instead
+    // of declining, in some scenarios where the request truly isn't
+    // possible). A tighter, not_available-preserving wording was tried
+    // and reverted — explicit user call: more NPCs actually doing things
+    // (an agreeable, lively world) matters more here than a maximally
+    // honest "I can't do that," so this trade is the intended shape, not
+    // a bug to chase back down. If not_available regresses further in
+    // later sessions, that's an active choice to revisit, not this one.
     private const string PlayerRequestInstruction =
-        "The player just spoke to you directly — see HEARD above. Answer them this turn with a real tool call, not just words. If it's a question, call speak with the honest, specific answer from what's listed above. If it's a request to do something, call the one matching tool right now if you're willing — including a casual \"come with me\"/\"walk with me\"/\"stay with me\" (that's follow, even without the word \"follow\" in it) — or call speak to say no, plainly, if you're not willing, or if the tool for it isn't listed below at all right now. That last case is a real, ordinary \"can't,\" and it comes up constantly: asked to pick apples with no pick_apple tool below, or catch fish with no catch_fish tool below, that specifically means no apple tree or fishing spot is close enough to see right now — say so plainly (\"I don't see any apple trees near me\" / \"there's no fishing spot in sight\") rather than reaching for a different gathering tool (gather_berry, gather_pinecone, pick_up_stick) or traveling off on your own guess instead — none of those are an answer to what was actually asked, just a way of quietly not answering it. Whatever reason you give, for going along with it or declining, has to actually be true of you — check it against your own BACKGROUND and PERSONALITY above before you say it, and never invent a reason that contradicts a fact already stated there. Default toward helping when you reasonably can: a genuine personality trait, an honest mood, or a real practical reason are all legitimate reasons to say no, but declining just because you can, with no real reason behind it, isn't personality, it's just unhelpful — some of you are more guarded than others, and that's fine, but it should come from who you actually are, not from reaching for an excuse. If they said both a question AND a request in the same line, answer the request — it's the time-sensitive half; the fact they asked about is still just as true and still answerable next time they ask.";
+        "The player just spoke to you directly — see HEARD above. Answer them this turn with a real tool call, not just words. If it's a question, call speak with the honest, specific answer from what's listed above. If it's a request to do something, call the one matching tool right now if you're willing — including a casual \"come with me\"/\"walk with me\"/\"stay with me\" (that's follow, even without the word \"follow\" in it) — or call speak to say no, plainly, if you're not willing, or if the tool for it isn't listed below at all right now. That last case is a real, ordinary \"can't,\" and it comes up constantly: asked to pick apples with no pick_apple tool below, or catch fish with no catch_fish tool below, that specifically means no apple tree or fishing spot is close enough to see right now — say so plainly (\"I don't see any apple trees near me\" / \"there's no fishing spot in sight\") rather than reaching for a different gathering tool (gather_berry, gather_pinecone, pick_up_stick) or traveling off on your own guess instead — none of those are an answer to what was actually asked, just a way of quietly not answering it. Whatever reason you give, for going along with it or declining, has to actually be true of you — check it against your own BACKGROUND and PERSONALITY above before you say it, and never invent a reason that contradicts a fact already stated there. For an easy, low-cost ask like this one — walk over and gather something, join in on what's already happening — a general trait or mood on its own (liking quiet, being curious about something else, preferring your own thing) isn't a real reason to refuse; that's flavor for how you go along with it, not an excuse not to. A real refusal needs something actually true and specific to right now — mid-task, hurt, in danger, or a concrete conflict with what you're doing this exact turn — not a standing preference you could invoke against anything. Some of you are more guarded than others, and that's fine, but it has to be earned by the moment, not worn as a permanent shield. And answering with something unrelated instead of the matching tool call — a different topic, small talk that doesn't address what they asked — isn't a real answer either; if you're not calling the tool, you still have to actually say no to it, plainly. If they said both a question AND a request in the same line, answer the request — it's the time-sensitive half; the fact they asked about is still just as true and still answerable next time they ask.";
 
     private const string SummarizeSystemPrompt =
         "You are compressing an NPC's memory log into a short diary paragraph (3-5 sentences) they'll carry forward. Preserve what matters for future decisions — where they've been, what they've done, anything notable, and anything said aloud (by them or heard from someone else), including who said or asked for what by name. A repeated identical failure is NOT routine detail — it's the opposite: state plainly what failed, why, and how many times, so it isn't attempted again pointlessly. Drop only genuinely routine, non-repeated detail (a single successful wait, a normal walk). Write in first person, past tense. Output ONLY the diary paragraph itself — no preamble like \"Here's my attempt to condense this...\", no closing note explaining what you kept or why. The reader is the NPC remembering their own day, not someone reviewing your summarization work.";
@@ -476,6 +510,103 @@ public class Mind
         if (start > 0 && char.IsLowSurrogate(s[start]))
             start++;
         return s.Substring(start);
+    }
+
+    // A real, observed case (see prompt_debug_2026-09-10_16-54-28.log):
+    // asked "how many apples did you get?", Wren's act call skipped
+    // structured tool-calling and wrote its whole reply as loose,
+    // slightly malformed JSON prose instead —
+    // {"name":"speak","parameters":{"message":"I got 2 apples,""emotion":"neutral"}}
+    // — which LenientParseFromText's speak branch (see its own header:
+    // "the spoken message is simply whatever the model actually wrote")
+    // then used verbatim as the spoken line, missing comma and all. That
+    // reasoning is right for genuine prose; it's wrong here, since this
+    // was never prose to begin with. Rather than special-case this deep
+    // inside parsing, every spoken message gets one cheap, unconditional
+    // pass through here — regardless of which path produced it — right
+    // before it becomes a chat bubble, a log line, or something another
+    // NPC hears (see NpcAgent.OnActionCompleted, the one place SPEAK
+    // actually reaches the player). A normal sentence with no braces or
+    // quotes in it matches none of these patterns and comes back
+    // untouched, so this costs nothing on the overwhelming majority of
+    // turns.
+    private static readonly Regex JsonMessageFieldRegex =
+        new(@"""message""\s*:\s*""((?:[^""\\]|\\.)*)""", RegexOptions.Compiled);
+    private static readonly Regex JsonCodeLikeRegex =
+        new(@"""\s*:\s*""|""name""|""parameters""|""emotion""", RegexOptions.Compiled);
+
+    public static string SanitizeSpokenMessage(string raw)
+    {
+        if (string.IsNullOrWhiteSpace(raw))
+            return raw;
+
+        string text = raw.Trim();
+        Match fieldMatch = JsonMessageFieldRegex.Match(text);
+        if (fieldMatch.Success)
+        {
+            // Found a well-formed (or well-formed-enough) "message":"..."
+            // field inside whatever the model wrote — pull out just that,
+            // not the surrounding tool-call scaffolding. Unescape the
+            // handful of JSON escapes a spoken sentence could plausibly
+            // contain; anything else (a stray "\u..." the regex above
+            // wouldn't even match the closing quote of) just falls
+            // through to StillLooksLikeJson below instead of half-
+            // unescaping into something worse.
+            string extracted = fieldMatch.Groups[1].Value
+                .Replace("\\\"", "\"")
+                .Replace("\\n", " ")
+                .Replace("\\t", " ")
+                .Replace("\\\\", "\\")
+                .Trim();
+            return StillLooksLikeJson(extracted) ? null : extracted;
+        }
+
+        return StillLooksLikeJson(text) ? null : text;
+    }
+
+    // Deliberately narrow — real spoken dialogue can absolutely contain
+    // a stray quote mark ("she said 'hi'") or even a lone brace in some
+    // quoted aside; what it essentially never contains is a quoted
+    // key immediately followed by a colon, which is what every branch
+    // here actually checks for. False positives here just mean an
+    // occasional ordinary sentence pays for the fallback LLM call below
+    // for no reason — safe, just wasteful; false negatives mean raw JSON
+    // reaches the player, which is the actual bug being fixed. Erring
+    // toward the former.
+    private static bool StillLooksLikeJson(string text) =>
+        string.IsNullOrWhiteSpace(text) || JsonCodeLikeRegex.IsMatch(text) || (text.Contains('{') && text.Contains('}'));
+
+    private const string SpeechCleanupSystemPrompt =
+        "You're proofreading one line of dialogue, not roleplaying a character. The line below was supposed to be plain spoken words but got mixed up with code or data formatting (JSON braces, quoted field names like \"message\" or \"emotion\", stray punctuation). Pull out and return ONLY the actual words a person would say out loud, as one plain natural sentence — no braces, no quotes around the whole thing, no field names, no code of any kind. If there's no real spoken content in it at all once the formatting is stripped away, reply with exactly: (didn't catch that)";
+
+    // The optional, expensive fallback SanitizeSpokenMessage's own
+    // header promises — only reached when the cheap regex pass above
+    // couldn't even find a "message" field to extract, so there's
+    // nothing left to try except asking a model to read the mess and
+    // say what the character was actually trying to say. Rare by
+    // design (SanitizeSpokenMessage handles the common shape, like the
+    // Wren case above, on its own with zero LLM cost); this exists for
+    // whatever's left over. Same provider, same "graceful fallback on
+    // any failure" shape as Summarize above — a placeholder line beats
+    // either raw JSON or a thrown exception reaching the player.
+    public async Task<string> CleanUpBrokenSpeech(string raw)
+    {
+        const string placeholder = "(didn't catch that)";
+        if (string.IsNullOrWhiteSpace(raw))
+            return placeholder;
+
+        var messages = new object[]
+        {
+            new { role = "system", content = SpeechCleanupSystemPrompt },
+            new { role = "user", content = raw },
+        };
+
+        ChatResult result = await _provider.Chat(messages, null);
+        if (!result.Ok)
+            return placeholder;
+
+        string cleaned = (result.Message.Content ?? "").Trim().Trim('"');
+        return string.IsNullOrWhiteSpace(cleaned) || StillLooksLikeJson(cleaned) ? placeholder : cleaned;
     }
 
     private readonly struct ParseResult
