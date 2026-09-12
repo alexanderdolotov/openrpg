@@ -169,6 +169,64 @@ again.
 | `mind.example.json` | Template for `mind.local.json` (gitignored) — configure your LLM backend here |
 | `logs/` | Optional per-run NPC thought logs (gitignored, opt-in — see below) |
 
+## Code architecture: how one action flows through the system
+
+This is a Godot 4 project, and Godot's engine core (not C#) owns the
+actual game loop — scene tree traversal, rendering, physics stepping,
+input polling. The C# scripts here don't run a loop of their own; Godot
+calls into them at fixed points every frame: `_Ready()` once per node
+on scene entry, `_Process(delta)` every rendered frame,
+`_PhysicsProcess(delta)` every fixed physics tick (this is what
+`NPCActor`'s state machine hooks), plus signals like `ActionCompleted`
+for event-style handoffs between objects.
+
+Concretely, tracing one full NPC turn end to end — deciding to
+`pick_apple`:
+
+1. **LLM tool call → parsed action.** `Mind.Decide()` (`scripts/Mind.cs`)
+   sends the world description and a tool menu built from what's
+   actually true right now to the model, gets back structured
+   tool-call JSON, and passes it to `Mind.ParseToolCall()`. That
+   extracts `target_id`/`emotion`/etc. and hands off to
+   `Mind.BuildAction()`, which defaults an empty target to the nearest
+   valid one (nearest tree for `pick_apple`), validates the id is real,
+   and constructs `GameAction("pick_apple", "tree_0",
+   ActionRanges.PickApple, emotion)` — an action id, a target id, and
+   the interaction range to use once in position. Never raw
+   coordinates, never a target that isn't actually registered in the
+   world.
+2. **Handoff to the engine layer.** `NpcAgent` (`scripts/NpcAgent.cs`)
+   unwraps that `GameAction` — or, if the LLM call failed or the
+   backend is unreachable, builds an equivalent one itself via
+   `RandomFallback()`, using the same `ActionRanges` constants — and
+   calls `Actor.AssignAction(action)`. This is the literal mind→engine
+   boundary: everything past this point is ordinary game code, no LLM
+   involved.
+3. **Resolve target, pathfind.** `NPCActor.AssignAction()`
+   (`scripts/NPCActor.cs`) resolves `"tree_0"` to the actual scene node
+   via `WorldRegistry.GetEntity()`, computes a route with
+   `PathGrid.FindPath()` (grid-based A*, `scripts/PathGrid.cs`), and
+   enters `State.Navigating`.
+4. **Walk until in range.** Each physics tick,
+   `NPCActor.ProcessNavigating()` advances along the A* waypoints and
+   compares distance-to-target against `CurrentAction.Range` — the
+   `ActionRanges.PickApple` value carried along since step 1. Once
+   within range, state flips to `Attempting`.
+5. **Interact.** `NPCActor.ProcessAttempting()` calls
+   `IInteractable.TryInteract(this, "pick_apple")` on the target node.
+   `AppleTree.TryInteract()` (`scripts/AppleTree.cs`) rolls a skill
+   check, decrements `AppleCount`, and adds `"apple"` to the NPC's
+   inventory.
+6. **Report back.** `NPCActor.Finish()` resets state to `Idle` and
+   emits the `ActionCompleted` signal; `NpcAgent.OnActionCompleted()`
+   logs the result, updates memory, and triggers the NPC's next turn.
+
+Every other action (`catch_fish`, `trade`, `attack`, `follow`, …) goes
+through the same shape — mind decides an id and a target, engine
+resolves it, paths to it, range-checks it, interacts with it — only the
+per-action `ActionRanges` constant (`scripts/ActionRanges.cs`) and the
+`IInteractable` implementation differ.
+
 ## Editing the game
 
 - **NPCs** — add or change entries in `npcs.json`; give them an
