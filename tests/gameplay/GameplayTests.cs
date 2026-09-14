@@ -22,6 +22,7 @@ public partial class GameplayTests : Node
         TestRecentEventBufferHasPendingDoesNotConsume();
         TestAssignActionReaffirmIsANoOp();
         TestAssignActionGenuineSwitchAwayFromSleep();
+        TestAttemptingIsNeverMidLongAction();
 
         if (_failures == 0)
             GD.Print("ALL GAMEPLAY TESTS PASSED");
@@ -97,6 +98,33 @@ public partial class GameplayTests : Node
         actor.AssignAction(wakeUp);
         Check(ReferenceEquals(actor.CurrentAction, wakeUp), "a genuinely different action really does take effect");
         Check(!actor.IsMidLongAction, "no longer mid-long-action once switched away from sleep");
+
+        actor.QueueFree();
+    }
+
+    // Regression test for a real bug caught from a live session's own
+    // thought log: NpcAgent's interrupt watcher (_Process) originally
+    // gated only on _thinking, which is false for the ENTIRE window an
+    // action spends resolving (Attempting), not just before it starts —
+    // so the watcher could fire a second, fully overlapping TakeTurn()
+    // call mid-speak, silently discarding the first decision's result
+    // (speak is deliberately excluded from AssignAction's no-op-reaffirm
+    // guard, so the second call's assignment genuinely overwrote the
+    // first). The fix gates the watcher on Actor.IsMidLongAction too —
+    // this locks in the exact boundary that fix depends on: a plain
+    // targetless action (speak/wait/eat/...) must NEVER read as
+    // mid-long-action, only Navigating/Sleeping should.
+    private void TestAttemptingIsNeverMidLongAction()
+    {
+        GD.Print("NPCActor.IsMidLongAction excludes Attempting...");
+        var actor = new NPCActor { Name = "TestActorAttempting" };
+        AddChild(actor);
+
+        actor.AssignAction(new GameAction("speak", "", 0f, message: "hello"));
+        Check(!actor.IsMidLongAction, "a resolving speak is not mid-long-action (the exact gap the interrupt-watcher bug lived in)");
+
+        actor.AssignAction(new GameAction("wait", "", 0f));
+        Check(!actor.IsMidLongAction, "a resolving wait is not mid-long-action either");
 
         actor.QueueFree();
     }

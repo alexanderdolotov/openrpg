@@ -41,8 +41,17 @@ public class Mind
     // Instruction only — "how to respond." "Who you are" comes from
     // Personality.DescribeForPrompt(), prepended per-call in Decide()
     // so the same instruction serves any NPC's personality.
+    // 2026-09-13: added the CURRENTLY clause — the "your plan" thought
+    // this produces is what the act call reasons FROM (Decide()'s "Your
+    // plan: {thought}" line), so it needs the same mid-action-reopen
+    // awareness ActInstruction's own matching clause has. Originally
+    // covered sleep too; dropped after a live test showed it didn't
+    // help (0/36 reaffirmations) — see NpcAgent.ShouldReopenDecision's
+    // header for the real fix (sleep is excluded from reopening
+    // entirely now, not reasoned about here). Still relevant for
+    // travel/gather-walk, the actions genuinely still reopened this way.
     private const string ThinkInstruction =
-        "Given the situation below, write ONE short, plain sentence (under 15 words) of what you're actually thinking right now. Talk like a real person thinking to themselves, not a novelist — no metaphors, no describing the scenery, no flowery language. If your last action failed, especially more than once, say so plainly and react to it. If the situation shows someone just said something to you — especially a direct request, like asking you to follow them or help with something — that's the single most important thing to react to right now, above anything else going on: think about THAT, specifically (agreeing, refusing, or being unsure are all real reactions — silently ignoring it and thinking about something else entirely is not, unless something more urgent is actively happening to you). Just the plain thought, nothing else.";
+        "Given the situation below, write ONE short, plain sentence (under 15 words) of what you're actually thinking right now. Talk like a real person thinking to themselves, not a novelist — no metaphors, no describing the scenery, no flowery language. If your last action failed, especially more than once, say so plainly and react to it. If the situation shows someone just said something to you — especially a direct request, like asking you to follow them or help with something — that's the single most important thing to react to right now, above anything else going on: think about THAT, specifically (agreeing, refusing, or being unsure are all real reactions — silently ignoring it and thinking about something else entirely is not, unless something more urgent is actively happening to you). If CURRENTLY below shows you're already mid-way through a walk, and nobody just spoke to you directly, let your thought actually weigh that — you were asked again because something specific happened, not because it's a fresh moment, and finishing is usually still the right call unless that specific thing genuinely changes things. Just the plain thought, nothing else.";
     // Rewritten clean/minimal, 2026-09-08 — the dense, exhaustively-
     // reasoned paragraph this used to be (every tool explained at
     // length, edge cases spelled out inline) is preserved in git
@@ -55,35 +64,28 @@ public class Mind
     // tool that simply isn't in the list. See llm_tuning/common.py's
     // ACT_INSTRUCTION (the version actually benchmarked) — port any
     // future change there too, in the same commit.
-    // 2026-09-13: added the RECENT ACTIONS clause and the "wait is a last
-    // resort" line — up to this point nothing here ever discouraged
-    // repeating a SUCCESSFUL action indefinitely (only a FAILED one, and
-    // only via the separate "last action just failed" clause below), so
-    // an NPC with no strong pull elsewhere would happily pick_apple every
-    // single turn for an entire session, or default to wait the moment
-    // nothing obviously stood out — neither reads as a character actually
-    // living in this world. Deliberately NOT "never repeat" — repeating a
-    // couple of times in a row is normal (finishing a task, a good
-    // gathering streak) and is exactly what NpcAgent.RecordRecentAction/
-    // DescribeRecentActions' own 3-in-a-row streak threshold before
-    // saying anything already reflects; this only asks for the SAME
-    // treatment repeated success already gets for repeated failure two
-    // sentences up — eventually, do something else. See
+    // 2026-09-13: added two clauses, same day but independent reasons.
+    // (1) RECENT ACTIONS + "wait is a last resort": until then, nothing
+    // here discouraged repeating a SUCCESSFUL action indefinitely (only
+    // a failed one, via the clause just above) — an NPC with no strong
+    // pull elsewhere would happily pick_apple forever, or default to
+    // wait the moment nothing obviously stood out. Not "never repeat" —
+    // a couple times in a row is normal, matching the streak threshold
+    // NpcAgent.DescribeRecentActions itself uses before saying anything;
+    // this just gives repeated SUCCESS the same "eventually, do
+    // something else" treatment repeated failure already had. See
     // NpcAgent.BuildPerception's RECENT ACTIONS section, the concrete
-    // thing this actually points at (an unenforceable "don't repeat
-    // yourself" vibe has nothing for a small model to check itself
-    // against otherwise). Port any change here to llm_tuning/common.py's
-    // ACT_INSTRUCTION too, same commit — see that file's own header.
-    // 2026-09-13, later same day: added the CURRENTLY clause once a real
-    // gap turned up while reviewing the new mid-action reopen path
-    // (NpcAgent.ShouldReopenDecision) — a reopened decision had no signal
-    // at all that a long action (a real walk, sleep) was already under
-    // way, so it read as a totally fresh choice with nothing to weigh
-    // against switching. This is the other half of the "don't bounce
-    // around" fix: NPCActor's own no-op-reaffirm guard only helps if the
-    // model actually reaffirms, and it had no reason to without this.
+    // thing this points at. (2) CURRENTLY: a decision reopened mid-action
+    // (NpcAgent.ShouldReopenDecision) had no signal that a long action
+    // was already under way, so it read as a totally fresh choice —
+    // this is what actually gives NPCActor's own no-op-reaffirm guard a
+    // reason to fire. Originally covered sleep too; see
+    // ShouldReopenDecision's own header for why that was dropped in
+    // favor of excluding sleep from reopening outright. Port any change
+    // here to llm_tuning/common.py's ACT_INSTRUCTION too, same commit —
+    // see that file's own header.
     private const string ActInstruction =
-        "Call exactly one of the tools listed below — whichever one best fits your personality, stats, and the situation above right now. If your last action just failed, don't repeat it — pick something that addresses why. Check RECENT ACTIONS above too: repeating an action a couple of times in a row is fine, but if it's been the same thing turn after turn, treat it as stale now and go do something else, even if it's still succeeding. wait is a last resort for when nothing else genuinely fits right now, never a routine choice or a default because nothing jumped out — an idle character is wrong here, so look harder before landing on it. If CURRENTLY above shows you're already mid-way through something, you were asked again because something specific happened — weigh it honestly, but finishing what you were already doing is usually still right unless that new thing genuinely changes things; don't abandon a long walk or a good sleep just because you were asked. Only target an id that's explicitly listed above; never invent one.";
+        "Call exactly one of the tools listed below — whichever one best fits your personality, stats, and the situation above right now. If your last action just failed, don't repeat it — pick something that addresses why. Check RECENT ACTIONS above too: repeating an action a couple of times in a row is fine, but if it's been the same thing turn after turn, treat it as stale now and go do something else, even if it's still succeeding. wait is a last resort for when nothing else genuinely fits right now, never a routine choice or a default because nothing jumped out — an idle character is wrong here, so look harder before landing on it. If CURRENTLY above shows you're already mid-way through something, you were asked again because something specific happened — weigh it honestly, but finishing what you were already doing is usually still right unless that new thing genuinely changes things; don't abandon a long walk just because you were asked. Only target an id that's explicitly listed above; never invent one.";
     // A completely separate, deliberately narrow instruction from
     // ActInstruction above — "the LLM can't choose to go pick berries
     // while a wolf is attacking them." Only ever used by
@@ -954,22 +956,16 @@ public class Mind
         // even when the phrase matched perfectly.
         //
         // 2026-09-13: extended from "only when targetId is omitted" to
-        // "also when it's given but simply isn't one of the currently-
-        // valid ones" — a live-model stress test (see
-        // tests/gameplay/ValidActionStressTest.cs) caught exactly this:
-        // asked to pick apples, the model named a plausible-looking but
-        // wrong id (a stale index, or one that actually belongs to a
-        // different resource category entirely) and the whole action
-        // used to fail outright over it, same as a genuinely
-        // unavailable request. The same reasoning that already justified
-        // defaulting an OMITTED target applies just as well here — this
-        // model's own phrasing was never going to name the exact right
-        // id either way, so silently correcting to the nearest REAL one
-        // for the SAME action is strictly better than discarding the
-        // whole decision and falling back to something unrelated. Still
-        // fails, same as before, when there's genuinely nothing valid to
-        // substitute (the array itself is empty) — see the switch below,
-        // unchanged.
+        // "also when it's given but wrong" — a live-model stress test
+        // (tests/gameplay/ValidActionStressTest.cs) caught the model
+        // naming a plausible but invalid id (a stale index, or one from
+        // a different resource category entirely) and failing the whole
+        // action over it. Same reasoning as the omitted case: this
+        // model's phrasing was never going to name the exact right id
+        // either way, so correcting to the nearest REAL one beats
+        // discarding the decision. Still fails when there's genuinely
+        // nothing to substitute (the array is empty) — see the switch
+        // below, unchanged.
         if (name is "pick_apple" or "catch_fish" or "gather_pinecone" or "gather_berry" or "pick_up_stick")
         {
             string[] validIds = name switch
@@ -980,7 +976,13 @@ public class Mind
                 "gather_berry" => targets.BerryBushIds,
                 _ => targets.StickIds, // pick_up_stick
             };
-            if (Array.IndexOf(validIds, targetId) < 0)
+            // Array.IndexOf throws on a null array rather than just
+            // reporting "not found" — every real call site always
+            // populates these (NpcAgent.TakeTurn builds every field,
+            // even to an empty array), so this has never been observed
+            // to fire, but matching the null-safe style the very next
+            // line already uses costs nothing and removes the risk.
+            if (validIds == null || Array.IndexOf(validIds, targetId) < 0)
                 targetId = validIds?.FirstOrDefault() ?? "";
         }
 

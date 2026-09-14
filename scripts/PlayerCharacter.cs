@@ -227,9 +227,11 @@ public partial class PlayerCharacter : NPCActor, IWorldCharacter
 
     // A radial PointLight2D sized to match what this player can actually
     // see/hear (SpatialMemory.VisionRadius, SpeechLog.HearingRadius —
-    // both currently 260, kept as a live reference to those rather than
-    // a separately-tuned number so this can never silently drift out of
-    // sync with the real perception ranges). Works together with Main's
+    // 1000 and 260 respectively as of this writing, genuinely different
+    // now, not both the same value; kept as a live reference to those
+    // rather than a separately-tuned number so this can never silently
+    // drift out of sync with the real perception ranges, whatever they
+    // currently are). Works together with Main's
     // CanvasModulate — that dims the whole world to a flat baseline;
     // this ADDS brightness back on top within its radius, additively,
     // which is why the two need to exist together to get "dim except

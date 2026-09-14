@@ -261,11 +261,12 @@ public partial class Rabbit : Animal
     // humans have an Inventory at all (a wolf or bear killing a rabbit
     // already gets its own reward — see Wolf/Bear's OnKilled — a real
     // pelt/meat drop on top of that would be double-dipping for them,
-    // and there's nowhere to put it anyway). Neither item does
-    // anything yet — meat isn't edible until a future cooking system,
-    // fur has no use yet either (Food.IsFood() doesn't know either
-    // name, same as a pinecone) — this only ever adds them to
-    // Inventory, nothing here or elsewhere consumes them.
+    // and there's nowhere to put it anyway). rabbit_meat isn't food
+    // on its own (Food.IsFood() says no, same as a pinecone) — FirePit's
+    // "cook_meat" is what turns it into the actually-edible cooked_meat
+    // (see Food.cs's own header). fur still has no use anywhere in the
+    // game — carryable/tradeable/stealable like any item, but nothing
+    // consumes it.
     protected override void Die(bool fromCombat = false)
     {
         if (LastAttacker is NPCActor killer)

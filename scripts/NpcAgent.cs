@@ -171,7 +171,28 @@ public partial class NpcAgent : Node, IWorldCharacter
 
     public override void _Process(double delta)
     {
-        if (_thinking || Actor.IsDown) return;
+        // _thinking only covers "an LLM call is in flight" — it's reset
+        // to false the instant Decide()/DecidePlayerRequest()/etc.
+        // returns, well before the physical action they chose (a
+        // speak's ~1.5s Attempting window, the pacing pause after,
+        // ...) actually finishes. A REAL bug this exact gap caused,
+        // confirmed from a live session's own thought log: with only
+        // _thinking checked here, this watcher could fire a second,
+        // fully overlapping TakeTurn() call while the FIRST decision's
+        // action was still resolving — speak is deliberately excluded
+        // from AssignAction's no-op-reaffirm guard (a repeat call must
+        // always actually execute, since the message differs), so the
+        // second call's AssignAction() genuinely overwrote the first
+        // one's CurrentAction and reset its attempt timer, mid-flight —
+        // the original decision's own Finish()/OnActionCompleted (and
+        // therefore its Memory record and result) never happened at
+        // all. IsMidLongAction (Navigating or Sleeping only) is the
+        // fix: those are the only two states this watcher was ever
+        // meant to interrupt in the first place (see this method's own
+        // header below) — Attempting is always short enough that
+        // there's nothing to gain by reconsidering mid-way through one,
+        // and now there's no risk of racing it either.
+        if (_thinking || Actor.IsDown || !Actor.IsMidLongAction) return;
         _timeSinceInterruptCheck += (float)delta;
         if (_timeSinceInterruptCheck < InterruptCheckIntervalSeconds) return;
         _timeSinceInterruptCheck = 0f;
@@ -182,16 +203,18 @@ public partial class NpcAgent : Node, IWorldCharacter
 
     // Deliberately narrow and deliberately cheap (world-state peeks only,
     // no LLM call) — this exists ONLY to let an already-in-progress long
-    // action (a real walk, a gather that needed one, sleep) get reopened
-    // for a specific, small set of reasons worth interrupting for, not to
+    // action (a real walk, a gather that needed one) get reopened for a
+    // specific, small set of reasons worth interrupting for, not to
     // second-guess it every half second regardless of cause. An earlier
     // version of this let ANY reconsideration reopen ANY in-progress
     // action on a blind clock — rejected specifically because nothing
-    // then stopped a long walk or a sleep from restarting before it ever
-    // finished, just because the model got asked again and answered
-    // slightly differently. This is the narrower replacement: danger, the
-    // player speaking directly, or noticing something another character
-    // did nearby — nothing else reopens it.
+    // then stopped a long walk from restarting before it ever finished,
+    // just because the model got asked again and answered slightly
+    // differently. This is the narrower replacement: danger, the player
+    // speaking directly, or noticing something another character did
+    // nearby — nothing else reopens it. Sleep doesn't get even this much
+    // — see the very first check in the method body below for why it's
+    // excluded from this whole mechanism, not just narrowed.
     //
     // New-animal sighting is edge-triggered off _lastAlertAnimalId (the
     // same field HandleAlert already uses) specifically so a wolf that's
@@ -209,6 +232,25 @@ public partial class NpcAgent : Node, IWorldCharacter
     // re-triggering for the same event/animal with no extra bookkeeping.
     private bool ShouldReopenDecision()
     {
+        // Sleep is mechanical, full stop, once it's actually under way —
+        // not a softer version of the other two long actions this
+        // watcher otherwise reopens for. A live stress test tried the
+        // OTHER fix first (teaching ThinkInstruction to weigh finishing
+        // a nap against whatever it was reopened for) and measured 0/36
+        // reaffirmations across two personalities and two harnesses —
+        // asking an LLM to reason its way back into "still asleep,
+        // actually" turns out not to be a prompting problem to solve at
+        // all: there's no reasoning happening while asleep to begin
+        // with, so nothing here should ask for any. The one real
+        // exception — an actual attack — already wakes this NPC
+        // unconditionally and instantly via NPCActor.ReceiveDamage
+        // ("if attacked, will always wake up from sleep"), completely
+        // independent of this watcher; nothing to duplicate here, and
+        // deliberately not extended to a nearby ALLY being attacked
+        // either (DetectThreatSituation covers that case too) — asleep
+        // means not seeing it happen, not a lighter kind of awake.
+        if (Actor.CurrentAction?.Id == "sleep") return false;
+
         if (DetectThreatSituation() != null) return true;
         Animal alertAnimal = DetectAlertAnimal();
         if (alertAnimal != null && alertAnimal.WorldId != _lastAlertAnimalId) return true;
@@ -1591,17 +1633,23 @@ public partial class NpcAgent : Node, IWorldCharacter
             sections.Add($"RECENT ACTIONS (yours, oldest to newest): {recentActions}");
 
         // A real, observed gap: NpcAgent.ShouldReopenDecision() can now
-        // reopen a full decision while a long action (a real walk, sleep)
-        // is still physically in progress — but without this line, the
-        // model asked mid-sleep or mid-travel had no way to know that;
-        // RECENT ACTIONS/LAST RESULT only ever update once an action
-        // actually FINISHES (OnActionCompleted), so a still-in-flight one
-        // was completely invisible here, and a reopened decision read as
-        // a totally fresh choice with no framing that anything was
-        // already committed to. Only shown for Navigating/Sleeping (see
-        // NPCActor.IsMidLongAction) — Attempting is always short enough
-        // (~1.5s) that there's nothing meaningful to reconsider mid-way
-        // through one anyway.
+        // reopen a full decision while a long action (a real walk) is
+        // still physically in progress — but without this line, the
+        // model asked mid-travel had no way to know that; RECENT
+        // ACTIONS/LAST RESULT only ever update once an action actually
+        // FINISHES (OnActionCompleted), so a still-in-flight one was
+        // completely invisible here, and a reopened decision read as a
+        // totally fresh choice with no framing that anything was already
+        // committed to. Gated on NPCActor.IsMidLongAction (Navigating or
+        // Sleeping), same as the watcher itself is, but in PRACTICE this
+        // can only ever show a Navigating action — ShouldReopenDecision
+        // excludes sleep from the whole reopen mechanism, so TakeTurn()
+        // never runs while genuinely asleep in the first place (the only
+        // thing that ever ends a sleep early is NPCActor.ReceiveDamage's
+        // own hard interrupt, which doesn't go through here at all).
+        // Attempting is excluded outright — always short enough (~1.5s)
+        // that there's nothing meaningful to reconsider mid-way through
+        // one anyway.
         if (Actor.IsMidLongAction && Actor.CurrentAction != null)
         {
             string curTargetNote = Actor.CurrentAction.TargetId != "" ? $" -> {DescribeTargetForMemory(Actor.CurrentAction.TargetId)}" : "";

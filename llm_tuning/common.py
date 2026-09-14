@@ -49,7 +49,12 @@ from dataclasses import dataclass, field
 # updated to match current BuildPerception() section-for-section. Same
 # gap for the CURRENTLY clause added later the same day (see Mind.cs) —
 # ACT_INSTRUCTION's text is ported for fidelity, CURRENTLY itself is not
-# wired into build_situation() below.
+# wired into build_situation() below. The clause's own wording dropped
+# its original "or a good sleep" example that same day too, once sleep
+# turned out to need mechanical exclusion from the reopen path instead of
+# better prompt wording (see NpcAgent.ShouldReopenDecision) — CURRENTLY
+# can no longer ever show "sleep" in the real game, so the example here
+# would have been actively misleading to keep.
 ACT_INSTRUCTION = (
     "Call exactly one of the tools listed below — whichever one best fits your personality, stats, and the situation above right now. "
     "If your last action just failed, don't repeat it — pick something that addresses why. Check RECENT ACTIONS above too: repeating "
@@ -58,7 +63,7 @@ ACT_INSTRUCTION = (
     "routine choice or a default because nothing jumped out — an idle character is wrong here, so look harder before landing on it. "
     "If CURRENTLY above shows you're already mid-way through something, you were asked again because something specific happened — "
     "weigh it honestly, but finishing what you were already doing is usually still right unless that new thing genuinely changes "
-    "things; don't abandon a long walk or a good sleep just because you were asked. Only target an id that's explicitly listed above; "
+    "things; don't abandon a long walk just because you were asked. Only target an id that's explicitly listed above; "
     "never invent one."
 )
 

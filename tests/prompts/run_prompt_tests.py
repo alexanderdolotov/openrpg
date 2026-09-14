@@ -158,18 +158,14 @@ def main():
     situation = common.situation_for(bram, targets, heard=None, inventory={})
     run_scenario(args, "nothing obvious to do — does wait dominate anyway?", bram, targets, situation)
 
-    # 4. CURRENTLY mid-sleep — spliced in manually, plus a witnessed event
-    # (the real trigger ShouldReopenDecision would have reopened this
-    # for). sleep_allowed=True so sleep stays a real, honest choice.
-    targets = common.base_targets(sleep_allowed=True)
-    situation = common.situation_for(
-        wren, targets, heard=None, inventory={}, witnessed="Alex picks up a stick.",
-    )
-    situation = insert_line(
-        situation,
-        "CURRENTLY: You're still in the middle of sleep — keep going unless something below actually changes your mind.",
-    )
-    run_scenario(args, "mid-sleep, reopened over a witnessed event — does it reaffirm sleep?", wren, targets, situation)
+    # A 4th scenario used to live here: CURRENTLY: mid-sleep, reopened by
+    # a witnessed event. Measured 0/20 reaffirmations, and stayed at 0
+    # even after a targeted prompt fix — root-caused as the wrong fix
+    # entirely (see NpcAgent.ShouldReopenDecision's own header): sleep
+    # needed to be excluded from the reopen mechanism outright, not
+    # reasoned about better. Removed once that landed, since CURRENTLY
+    # can no longer show "sleep" in the real game at all — see
+    # ../README.md's own note on this for the full story.
 
 
 if __name__ == "__main__":

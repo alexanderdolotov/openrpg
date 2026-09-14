@@ -515,13 +515,18 @@ public partial class NPCActor : CharacterBody2D, ICombatant
     public bool IsDown => _state == State.Incapacitated || _permanentlyDown;
     private bool _permanentlyDown = false;
 
-    // Navigating (a real walk in progress) or Sleeping specifically —
-    // the two states a reopened decision (see NpcAgent.ShouldReopenDecision)
-    // can genuinely interrupt mid-way and that are worth telling the mind
-    // about honestly. NOT Attempting — that's always short (AttemptDuration,
-    // ~1.5s) regardless of what it's attempting, so there's nothing
-    // meaningful to reconsider mid-way through one. Public so NpcAgent's
-    // own perception-building (BuildPerception's CURRENTLY line) can ask
+    // Navigating (a real walk in progress) or Sleeping — the two states
+    // genuinely worth calling out as "a long commitment, not a quick
+    // one," and what NpcAgent's interrupt watcher gates on before even
+    // checking whether anything's worth reopening a decision for. Sleep
+    // gets excluded from that reopening itself one level up (see
+    // NpcAgent.ShouldReopenDecision's own header), not here — this
+    // property just answers "is this a long action," full stop; what
+    // happens next for each of the two is that method's call. NOT
+    // Attempting — that's always short (AttemptDuration, ~1.5s)
+    // regardless of what it's attempting, so there's nothing meaningful
+    // to reconsider mid-way through one. Public so NpcAgent's own
+    // perception-building (BuildPerception's CURRENTLY line) can ask
     // without needing the private State enum itself exposed.
     public bool IsMidLongAction => _state is State.Navigating or State.Sleeping;
 
@@ -739,20 +744,20 @@ public partial class NPCActor : CharacterBody2D, ICombatant
             return;
 
         // A genuine reaffirmation of whatever's already physically under
-        // way — NpcAgent.ShouldReopenDecision() can now reopen a decision
-        // mid-walk/mid-sleep for danger, direct player speech, or a
-        // witnessed event, and the honest, common outcome is "still worth
-        // doing the same thing" (a nearby witnessed event that doesn't
-        // actually change anything, say). Left alone entirely rather than
-        // reset: restarting _elapsed/_waypoints/the sleep timer just
-        // because the model re-confirmed the same choice would mean a
-        // 20-second sleep could never finish, and a long walk would
-        // visibly stutter every time something nearby merely got noticed.
-        // speak and flee are excluded — speak is never a resumable
-        // multi-second commitment (every call is a fresh line), and
-        // flee's whole point is a freshly computed Destination that can
-        // legitimately change turn to turn, which this id/target-only
-        // comparison can't see.
+        // way — NpcAgent.ShouldReopenDecision() can reopen a decision
+        // mid-walk for danger, direct player speech, or a witnessed
+        // event (NOT mid-sleep — see that method's own header for why
+        // sleep is excluded from this whole mechanism), and the honest,
+        // common outcome is "still worth doing the same thing" (a nearby
+        // witnessed event that doesn't actually change anything, say).
+        // Left alone entirely rather than reset: restarting
+        // _elapsed/_waypoints just because the model re-confirmed the
+        // same choice would mean a long walk visibly stuttering every
+        // time something nearby merely got noticed. speak and flee are
+        // excluded — speak is never a resumable multi-second commitment
+        // (every call is a fresh line), and flee's whole point is a
+        // freshly computed Destination that can legitimately change
+        // turn to turn, which this id/target-only comparison can't see.
         bool reaffirmingInProgress = _state != State.Idle && action.Id is not ("speak" or "flee") &&
             CurrentAction != null && CurrentAction.Id == action.Id && CurrentAction.TargetId == action.TargetId;
         if (reaffirmingInProgress)
@@ -761,13 +766,17 @@ public partial class NPCActor : CharacterBody2D, ICombatant
         // Tearing down whatever was in progress before switching to
         // something genuinely different — ProcessNavigating() already
         // recomputes cleanly on its own below, but Sleeping is a distinct
-        // pose (see BeginSleepVisual) that nothing else here resets.
-        // Previously only ReceiveDamage (woken by a hit) and
-        // HandleIncapacitation (starvation) ever ended it — both hard
-        // interrupts. Now that an ordinary reopened decision can also
-        // choose something else mid-sleep, this closes that gap generally
-        // rather than leaving the rotated/💤 visual stuck through
-        // whatever comes next.
+        // pose (see BeginSleepVisual) that nothing else here resets. In
+        // today's call graph this specific branch is dead in practice —
+        // ReceiveDamage (woken by a hit) and HandleIncapacitation
+        // (starvation) are the only two things that ever actually end a
+        // sleep, and neither goes through AssignAction() to do it — but
+        // AssignAction() is a general, low-level entry point with
+        // several callers (see NpcAgent's own HandleAlert/
+        // HandleAloneAndUneasy/HandleThreatTurn, not just the normal
+        // turn), so guarding it here directly costs nothing and doesn't
+        // depend on every current and future caller independently
+        // knowing sleep can't reach it.
         if (_state == State.Sleeping)
             EndSleepVisual();
 
