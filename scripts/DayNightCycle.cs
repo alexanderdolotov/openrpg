@@ -37,6 +37,15 @@ public partial class DayNightCycle : CanvasModulate
 
     private float _elapsed;
 
+    // A single global CanvasModulate node exists per session (see Main.
+    // BuildLighting), so a static flag is a safe, cheap way for anything
+    // that isn't a Node2D in this same lighting tree — NpcAgent's own
+    // IsAloneAndUneasy(), specifically — to ask "is it night right now"
+    // without needing a reference to this node at all. Same "static,
+    // shared ambient state" shape SpeechLog/WorldEventLog/GameSettings
+    // already use elsewhere in this project.
+    public static bool IsNight { get; private set; }
+
     public override void _Process(double delta)
     {
         _elapsed += (float)delta;
@@ -48,5 +57,10 @@ public partial class DayNightCycle : CanvasModulate
         // gradual shift rather than a mechanical ramp.
         float t = (Mathf.Cos(phase * Mathf.Tau) + 1f) / 2f; // 1 at midday, 0 at midnight
         Color = NightColor.Lerp(DayColor, t);
+
+        // Below the midpoint of the blend, not just "past literal
+        // midnight" — reads as "night" for roughly the same span this
+        // already visually looks dark, not a razor-thin instant.
+        IsNight = t < 0.5f;
     }
 }

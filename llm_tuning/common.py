@@ -38,10 +38,28 @@ from dataclasses import dataclass, field
 # same fidelity rule this file has always followed. See build_situation()/
 # persona_line() below for the matching switch to labeled sections in the
 # situation text itself.
+# 2026-09-13: ported the RECENT ACTIONS/wait-as-last-resort clause added
+# to Mind.ActInstruction the same day — see that constant's own header
+# in Mind.cs for why. NOTE: this string is kept in sync per this file's
+# own fidelity rule, but the RECENT ACTIONS section itself (like LAST
+# RESULT before it — see NpcAgent.BuildPerception) is NOT yet wired into
+# build_situation() below; this harness's situation text has been behind
+# the real game's on that front since LAST RESULT shipped, not something
+# newly introduced here. Wire both in together if this harness is ever
+# updated to match current BuildPerception() section-for-section. Same
+# gap for the CURRENTLY clause added later the same day (see Mind.cs) —
+# ACT_INSTRUCTION's text is ported for fidelity, CURRENTLY itself is not
+# wired into build_situation() below.
 ACT_INSTRUCTION = (
     "Call exactly one of the tools listed below — whichever one best fits your personality, stats, and the situation above right now. "
-    "If your last action just failed, don't repeat it — pick something that addresses why. Only target an id that's explicitly listed "
-    "above; never invent one."
+    "If your last action just failed, don't repeat it — pick something that addresses why. Check RECENT ACTIONS above too: repeating "
+    "an action a couple of times in a row is fine, but if it's been the same thing turn after turn, treat it as stale now and go do "
+    "something else, even if it's still succeeding. wait is a last resort for when nothing else genuinely fits right now, never a "
+    "routine choice or a default because nothing jumped out — an idle character is wrong here, so look harder before landing on it. "
+    "If CURRENTLY above shows you're already mid-way through something, you were asked again because something specific happened — "
+    "weigh it honestly, but finishing what you were already doing is usually still right unless that new thing genuinely changes "
+    "things; don't abandon a long walk or a good sleep just because you were asked. Only target an id that's explicitly listed above; "
+    "never invent one."
 )
 
 PLAYER_REQUEST_INSTRUCTION = (
@@ -78,10 +96,14 @@ ITEM_TYPES = [
     "stick", "rabbit_meat", "fur", "torch", "cooked_meat",
 ]
 
+# "attentive_listening" is deliberately NOT here, unlike "listen" — see
+# Mind.ValidActions' own comment in the parent project: it's a
+# mechanical-only reflex, never offered as a tool and never called by
+# the model, same as "flee" already isn't listed here either.
 VALID_ACTIONS = [
     "pick_apple", "catch_fish", "gather_pinecone", "gather_berry", "deposit", "travel",
     "speak", "follow", "trade", "steal", "attack", "eat", "pick_up_stick", "sleep",
-    "wait", "light_fire", "make_torch", "cook_meat",
+    "wait", "light_fire", "make_torch", "cook_meat", "listen",
 ]
 
 
@@ -103,6 +125,8 @@ class AvailableTargets:
     light_fire_allowed: bool = False
     make_torch_allowed: bool = False
     cook_meat_allowed: bool = False
+    # See Mind.AvailableTargets.ListenAllowed's own comment.
+    listen_allowed: bool = False
 
 
 def _emotion_prop(description: str = "how you're feeling right now") -> dict:
@@ -131,7 +155,11 @@ def build_tools(targets: AvailableTargets) -> list[dict]:
         fn("deposit", "Walk home and deposit everything you're currently carrying, whatever the mix of items.",
            {"target_id": {"type": "string", "enum": ["home"]}, "emotion": _emotion_prop()},
            ["target_id", "emotion"]),
-        fn("wait", "Do nothing this turn.",
+        # 2026-09-13: ported the "last resort" wording added to
+        # Mind.BuildTools' wait description the same day — see that
+        # constant's own header in Mind.cs.
+        fn("wait", "Do nothing this turn. A last resort only, for when nothing else genuinely fits right now — not a routine choice, "
+           "and not something to reach for just because nothing jumped out.",
            {"emotion": _emotion_prop()},
            ["emotion"]),
         fn("speak",
@@ -142,6 +170,14 @@ def build_tools(targets: AvailableTargets) -> list[dict]:
            {"message": {"type": "string", "description": "what you say out loud"}, "emotion": _emotion_prop()},
            ["message", "emotion"]),
     ]
+
+    # Only offered when someone actually just said something to this NPC
+    # this turn — see AvailableTargets.listen_allowed's own comment.
+    if targets.listen_allowed:
+        tools.append(fn("listen",
+            "Stay quiet and actually take in what was just said to you, rather than answering right away — a real choice for "
+            "hearing someone out, thinking it over, or simply not being ready to reply yet.",
+            {"emotion": _emotion_prop()}, ["emotion"]))
 
     if targets.sleep_allowed:
         tools.append(fn("sleep",

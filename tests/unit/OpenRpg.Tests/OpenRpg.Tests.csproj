@@ -1,0 +1,77 @@
+﻿<Project Sdk="Microsoft.NET.Sdk">
+
+  <!--
+    Plain xUnit project, NOT Godot.NET.Sdk — deliberately. This only
+    exercises game-logic classes that have zero Godot engine dependency
+    (no Node lifecycle, no engine singletons like Time.GetTicksMsec()),
+    so a plain `dotnet test` run works with no Godot runtime, no headless
+    editor, no scene tree. Anything that DOES need the engine running
+    (NpcAgent, NPCActor, RecentEventBuffer's use of Time.GetTicksMsec(),
+    anything under a Node) is deliberately out of scope here — see
+    ../../README.md for how that's covered instead.
+  -->
+  <PropertyGroup>
+    <!--
+      net10.0, not net8.0 (what the main Godot.NET.Sdk project targets) —
+      this project isn't run by Godot's own bundled runtime the way the
+      game is, it's run directly via `dotnet test`, which needs an
+      actually-installed matching shared runtime. It only recompiles the
+      same Godot-independent source files fresh into its own assembly
+      (see the Compile items below), so the two projects' target
+      frameworks don't need to match. Bump this if the installed SDK ever
+      changes and net10.0 stops being available.
+    -->
+    <TargetFramework>net10.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>disable</Nullable>
+    <IsPackable>false</IsPackable>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="coverlet.collector" Version="6.0.4" />
+    <PackageReference Include="Microsoft.NET.Test.Sdk" Version="17.14.1" />
+    <PackageReference Include="xunit" Version="2.9.3" />
+    <PackageReference Include="xunit.runner.visualstudio" Version="3.1.4" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <Using Include="Xunit" />
+  </ItemGroup>
+
+  <!--
+    Compiled directly against the real game source files, not a
+    ProjectReference to OpenRPG.csproj — that project is Godot.NET.Sdk-based
+    and pulls in the full GodotSharp/engine-hosting toolchain, which fights
+    a plain `dotnet test` run. Including the specific Godot-independent
+    source files directly keeps this project testing the SAME code the
+    game actually ships (no copy/paste, no reimplementation) without any
+    of that. If a file listed here ever gains a real Godot dependency,
+    move it out of this list rather than adding a Godot reference here.
+  -->
+  <ItemGroup>
+    <Compile Include="../../../scripts/Mind.cs" Link="GameSource/Mind.cs" />
+    <Compile Include="../../../scripts/NpcMemory.cs" Link="GameSource/NpcMemory.cs" />
+    <Compile Include="../../../scripts/GameAction.cs" Link="GameSource/GameAction.cs" />
+    <Compile Include="../../../scripts/ActionRanges.cs" Link="GameSource/ActionRanges.cs" />
+    <Compile Include="../../../scripts/Emotion.cs" Link="GameSource/Emotion.cs" />
+    <Compile Include="../../../scripts/Personality.cs" Link="GameSource/Personality.cs" />
+    <Compile Include="../../../scripts/ILlmProvider.cs" Link="GameSource/ILlmProvider.cs" />
+    <Compile Include="../../../scripts/LlmTypes.cs" Link="GameSource/LlmTypes.cs" />
+    <Compile Include="../../../scripts/PromptDebugLogger.cs" Link="GameSource/PromptDebugLogger.cs" />
+    <Compile Include="../../../scripts/CharacterStats.cs" Link="GameSource/CharacterStats.cs" />
+    <Compile Include="../../../scripts/Dice.cs" Link="GameSource/Dice.cs" />
+    <Compile Include="../../../scripts/SkillCheck.cs" Link="GameSource/SkillCheck.cs" />
+    <Compile Include="../../../scripts/DifficultyClass.cs" Link="GameSource/DifficultyClass.cs" />
+  </ItemGroup>
+
+  <!--
+    GameAction.Destination is a Godot.Vector2? and SkillCheck uses
+    Godot.Collections.Dictionary — both plain data, no engine/runtime
+    calls, so referencing GodotSharp directly (the same assembly the main
+    project builds against) is enough; no running Godot process needed.
+  -->
+  <ItemGroup>
+    <PackageReference Include="GodotSharp" Version="4.7.2" />
+  </ItemGroup>
+
+</Project>

@@ -57,6 +57,22 @@ public partial class NpcAgent : Node, IWorldCharacter
     private string _lastFailureKey = "";
     private int _consecutiveFailures = 0;
 
+    // A short rolling window of this NPC's own most recent action ids
+    // (every attempt, success or failure — repetition is about what was
+    // CHOSEN, not how it turned out) — kept outside Memory for the exact
+    // same reason _lastResultLine is, just above: it has to stay legible
+    // to the model every single turn, verbatim, not get smoothed into
+    // vague diary prose the moment NpcMemory compresses. This is what
+    // ActInstruction's "repeating a couple times is fine, forever isn't"
+    // guidance actually points at — without a concrete, always-visible
+    // list, "you're repeating yourself" is an unenforceable vibe with
+    // nothing for a small model to check itself against. Deliberately a
+    // short window, not a full history — this is for noticing "I've done
+    // nothing but pick apples for a while now," not a record of the
+    // whole session (that's Memory's own diary/"Recently:" block).
+    private readonly List<string> _recentActionIds = new();
+    private const int RecentActionWindow = 6;
+
     // Noticing an inventory change caused by someone ELSE (a trade
     // received, a theft) rather than this NPC's own last action —
     // AbsorbOwnChange() runs right after this NPC's own action resolves
@@ -144,6 +160,62 @@ public partial class NpcAgent : Node, IWorldCharacter
     }
 
     public void Start() => _ = TakeTurn();
+
+    // How often ShouldReopenDecision() below gets checked while something
+    // else (an in-flight LLM call, or nothing at all right now) isn't
+    // already keeping this NPC busy — cheap world-state peeks only, no
+    // LLM call, so this can run often without cost. See ShouldReopenDecision
+    // itself for what actually earns a real TakeTurn() call.
+    private float _timeSinceInterruptCheck;
+    private const float InterruptCheckIntervalSeconds = 0.5f;
+
+    public override void _Process(double delta)
+    {
+        if (_thinking || Actor.IsDown) return;
+        _timeSinceInterruptCheck += (float)delta;
+        if (_timeSinceInterruptCheck < InterruptCheckIntervalSeconds) return;
+        _timeSinceInterruptCheck = 0f;
+
+        if (ShouldReopenDecision())
+            _ = TakeTurn();
+    }
+
+    // Deliberately narrow and deliberately cheap (world-state peeks only,
+    // no LLM call) — this exists ONLY to let an already-in-progress long
+    // action (a real walk, a gather that needed one, sleep) get reopened
+    // for a specific, small set of reasons worth interrupting for, not to
+    // second-guess it every half second regardless of cause. An earlier
+    // version of this let ANY reconsideration reopen ANY in-progress
+    // action on a blind clock — rejected specifically because nothing
+    // then stopped a long walk or a sleep from restarting before it ever
+    // finished, just because the model got asked again and answered
+    // slightly differently. This is the narrower replacement: danger, the
+    // player speaking directly, or noticing something another character
+    // did nearby — nothing else reopens it.
+    //
+    // New-animal sighting is edge-triggered off _lastAlertAnimalId (the
+    // same field HandleAlert already uses) specifically so a wolf that's
+    // been sitting in view for a while doesn't retrigger this forever —
+    // only a freshly appeared one does. An actual attack ON THIS NPC
+    // already interrupts instantly via NPCActor.ReceiveDamage, completely
+    // independent of this — nothing to duplicate there; DetectThreatSituation()
+    // is still checked here too because it also covers a nearby ALLY being
+    // attacked, which ReceiveDamage never fires for on this NPC's own Actor.
+    //
+    // Once a reopened TakeTurn() actually runs, its own real perception-
+    // gathering (SpeechLog.Overheard/WorldEventLog.Witnessed) consumes
+    // these same entries for real, and HandleAlert() updates
+    // _lastAlertAnimalId — so the next check here naturally stops
+    // re-triggering for the same event/animal with no extra bookkeeping.
+    private bool ShouldReopenDecision()
+    {
+        if (DetectThreatSituation() != null) return true;
+        Animal alertAnimal = DetectAlertAnimal();
+        if (alertAnimal != null && alertAnimal.WorldId != _lastAlertAnimalId) return true;
+        if (SpeechLog.HasPending(Personality.Name, Actor.GlobalPosition, IsPlayerName)) return true;
+        if (WorldEventLog.HasPending(Personality.Name, Actor.GlobalPosition)) return true;
+        return false;
+    }
 
     private async Task TakeTurn()
     {
@@ -344,6 +416,32 @@ public partial class NpcAgent : Node, IWorldCharacter
             }
         }
 
+        // Nothing dangerous in sight — but this NPC might still be
+        // freshly alone enough to feel uneasy about it. Only checked
+        // when there's no visible animal danger at all (alertAnimal ==
+        // null) — an actual threat is a strictly bigger deal, and
+        // either already resolved this turn above or is already part of
+        // the normal perception the LLM turn below sees. Same
+        // "mechanical reflex, skip the normal turn entirely this cycle"
+        // shape as the animal alert just above; see HandleAloneAndUneasy's
+        // own header for why this specifically only fires once per fresh
+        // spell of solitude, not every turn solitude continues.
+        if (alertAnimal == null)
+        {
+            GameAction aloneAction = HandleAloneAndUneasy();
+            if (aloneAction != null)
+            {
+                // MUST happen before this returns — same real,
+                // previously-observed freeze this exact line already
+                // guards against for the animal alert above.
+                _thinking = false;
+                _uiLog($"[{Personality.Name}] pauses to listen to their surroundings", "6f8068");
+                _thoughtLog.Log(Personality.Name, "ACTION_ATTEMPT", "attentive_listening (alone and uneasy)");
+                Actor.AssignAction(aloneAction);
+                return;
+            }
+        }
+
         // Built here, ahead of the two priority branches below, rather
         // than right before the normal Decide() call the way it used
         // to sit — HandleDirectPlayerRequest needs the exact same
@@ -371,6 +469,12 @@ public partial class NpcAgent : Node, IWorldCharacter
             LightFireAllowed = !_world.FirePit.IsLit,
             MakeTorchAllowed = _world.FirePit.IsLit && Actor.Inventory.Has("stick"),
             CookMeatAllowed = _world.FirePit.IsLit && Actor.Inventory.Has("rabbit_meat"),
+            // Someone actually said something to this NPC this turn —
+            // see AvailableTargets.ListenAllowed's own header. Forced
+            // back off just below for the direct-player-request branch
+            // specifically, since that one owes a real answer, not a
+            // dodge into "I'm just listening."
+            ListenAllowed = freshHeard.Count > 0,
         };
 
         // A direct line from the real player takes priority over the
@@ -385,6 +489,12 @@ public partial class NpcAgent : Node, IWorldCharacter
         // the other way").
         if (playerRequestMessage != null)
         {
+            // A real answer is owed this turn (see PlayerRequestInstruction)
+            // — "listen" would be a way of quietly not giving one, so it's
+            // off the table for this specific call regardless of
+            // freshHeard, even though the player's own message is exactly
+            // what set ListenAllowed true just above.
+            targets.ListenAllowed = false;
             await HandleDirectPlayerRequest(playerRequestSpeaker, playerRequestMessage, perception, targets);
             return;
         }
@@ -1143,6 +1253,64 @@ public partial class NpcAgent : Node, IWorldCharacter
         return new GameAction("flee", "", 0f, destination: ComputeFleeDestination(new List<Animal> { dangerous }));
     }
 
+    // --- attentive_listening: alone (or scared) with nobody to talk to ---
+    //
+    // A different kind of unease from the animal-alert reflex above —
+    // there's nothing actually dangerous in sight, just nobody around
+    // either, which is its own real reason for a character to pause and
+    // check their surroundings, separate from conversation ("listen"
+    // above is a response to someone speaking; this is the opposite —
+    // nobody TO speak to at all). Deliberately mechanical, no LLM call,
+    // same posture as the animal alert for the same reason: this is a
+    // cheap, frequent-enough check that a real round trip per turn isn't
+    // worth it.
+    //
+    // Edge-triggered, not continuous, unlike the animal alert's own
+    // per-NEW-sighting throttle — solitude doesn't come and go the way
+    // an animal's presence does, it just stays true for as long as this
+    // NPC happens to be alone, so re-checking "alone AND uneasy" every
+    // single turn would fire it every single turn for the entire
+    // stretch, permanently crowding out this NPC's real turn loop the
+    // moment it's ever alone at night. _wasAloneAndUneasy tracks
+    // whether this was ALREADY true last turn: the reflex only fires at
+    // the MOMENT solitude begins, then gets out of the way for this
+    // NPC's normal decisions for as long as it continues, and is ready
+    // to fire again the next time a fresh spell of solitude starts.
+    private bool _wasAloneAndUneasy;
+
+    // "No one nearby" reuses NearbyNpcNames() rather than a separate
+    // distance scan — same hearing-range definition of "nearby" as
+    // follow/speak/everything else, and it already excludes this NPC
+    // itself while including the player (PlayerCharacter is an
+    // IWorldCharacter in _world.Agents same as any NpcAgent). Night OR
+    // low Bravery, not AND — either one alone is a real reason to feel
+    // uneasy being by yourself; BraveryMod < 0 is the same "below
+    // average" cutoff DefaultReflexAction already uses for "not
+    // particularly brave."
+    private bool IsAloneAndUneasy()
+    {
+        if (NearbyNpcNames().Length > 0) return false;
+        return DayNightCycle.IsNight || Actor.Stats.BraveryMod < 0;
+    }
+
+    // Only ever called when DetectAlertAnimal() found nothing — an
+    // actual dangerous animal in sight is a strictly bigger deal than
+    // general solitude, and already either resolved this whole turn (a
+    // cautious/bold roll) or deliberately fell through to a normal LLM
+    // turn that already sees the animal in its own perception. Returns
+    // the action to assign, or null when nothing about being alone right
+    // now is NEW (see _wasAloneAndUneasy's own header) and this turn
+    // should carry on to its normal decision.
+    private GameAction HandleAloneAndUneasy()
+    {
+        bool aloneAndUneasy = IsAloneAndUneasy();
+        GameAction result = (aloneAndUneasy && !_wasAloneAndUneasy)
+            ? new GameAction("attentive_listening", "", 0f)
+            : null;
+        _wasAloneAndUneasy = aloneAndUneasy;
+        return result;
+    }
+
     private string[] _stickIds;
     private int _stickIdsVersion = -1;
     private string[] StickIds()
@@ -1418,6 +1586,27 @@ public partial class NpcAgent : Node, IWorldCharacter
         var sections = new List<string> { $"SETTING: {SettingLine}" };
         if (_lastResultLine != "")
             sections.Add($"LAST RESULT: {_lastResultLine}");
+        string recentActions = DescribeRecentActions();
+        if (recentActions != null)
+            sections.Add($"RECENT ACTIONS (yours, oldest to newest): {recentActions}");
+
+        // A real, observed gap: NpcAgent.ShouldReopenDecision() can now
+        // reopen a full decision while a long action (a real walk, sleep)
+        // is still physically in progress — but without this line, the
+        // model asked mid-sleep or mid-travel had no way to know that;
+        // RECENT ACTIONS/LAST RESULT only ever update once an action
+        // actually FINISHES (OnActionCompleted), so a still-in-flight one
+        // was completely invisible here, and a reopened decision read as
+        // a totally fresh choice with no framing that anything was
+        // already committed to. Only shown for Navigating/Sleeping (see
+        // NPCActor.IsMidLongAction) — Attempting is always short enough
+        // (~1.5s) that there's nothing meaningful to reconsider mid-way
+        // through one anyway.
+        if (Actor.IsMidLongAction && Actor.CurrentAction != null)
+        {
+            string curTargetNote = Actor.CurrentAction.TargetId != "" ? $" -> {DescribeTargetForMemory(Actor.CurrentAction.TargetId)}" : "";
+            sections.Add($"CURRENTLY: You're still in the middle of {Actor.CurrentAction.Id}{curTargetNote} — keep going unless something below actually changes your mind.");
+        }
 
         // Nearest-N per category, THEN merged by guaranteed-diversity-
         // then-nearest with a shared character budget
@@ -1729,6 +1918,66 @@ public partial class NpcAgent : Node, IWorldCharacter
     // perfectly good tree after two unlucky rolls in a row.
     private static readonly HashSet<string> ChanceBasedReasons = new() { "fumbled", "steal_failed" };
 
+    // Feeds _recentActionIds — see its own header. Called once per
+    // resolved action from OnActionCompleted, regardless of outcome.
+    private void RecordRecentAction(string actionId)
+    {
+        _recentActionIds.Add(actionId);
+        if (_recentActionIds.Count > RecentActionWindow)
+            _recentActionIds.RemoveAt(0);
+    }
+
+    // Oldest-to-newest, with an explicit streak call-out appended —
+    // "pick_apple, pick_apple, pick_apple" alone still takes a small
+    // model a beat to notice on its own; naming the streak plainly is
+    // what actually gets it to react, same lesson UpdateLastResult's own
+    // escalating wording already learned for repeated FAILURES
+    // specifically (just above). This is the successful-repeat
+    // counterpart: a streak of the same CHOICE, win or lose. Null, not
+    // "", when there's nothing yet — BuildPerception only adds the
+    // section at all when this returns something.
+    private string DescribeRecentActions()
+    {
+        if (_recentActionIds.Count == 0) return null;
+
+        string sequence = string.Join(", ", _recentActionIds);
+        string last = _recentActionIds[_recentActionIds.Count - 1];
+        int streak = 0;
+        for (int i = _recentActionIds.Count - 1; i >= 0 && _recentActionIds[i] == last; i--)
+            streak++;
+        string streakNote = streak >= 3 ? $" — that's \"{last}\" {streak} times in a row now." : "";
+        return $"{sequence}{streakNote}";
+    }
+
+    // Translates a raw target id into something that's still legible
+    // once it's sitting alone in a memory entry, well after the fact —
+    // most target ids already are (an NPC's own display name for
+    // follow/trade/steal/attack-on-a-person, "home", a resource id like
+    // "tree_0"), but an animal's WorldId ("animal_5") carries no species
+    // at all once that animal is gone from NEARBY and nothing else this
+    // turn still names it. A real, observed bug this exists to fix: an
+    // NPC that fought off a wolf had every attack recorded as bare
+    // "attack succeeded on animal_5" with no species — or, before this
+    // whole method existed, not even that much (see OnActionCompleted's
+    // own header) — so nothing about the fight read as a WOLF fight by
+    // the time NpcMemory compressed it, and the NPC genuinely couldn't
+    // recall it when asked afterward. Best-effort: an animal already
+    // removed from _world.Animals by the instant this runs (the killing
+    // blow, specifically — see Main's own Died-signal cleanup) falls
+    // back to the bare id rather than nothing, since there's no live
+    // Animal left here to ask its species.
+    private string DescribeTargetForMemory(string targetId)
+    {
+        if (targetId == "") return "";
+        foreach (Animal a in _world.Animals)
+        {
+            if (!IsInstanceValid(a) || a.WorldId != targetId) continue;
+            string species = a switch { Wolf => "wolf", Bear => "bear", Rabbit => "rabbit", _ => "animal" };
+            return $"the {species} ({targetId})";
+        }
+        return targetId;
+    }
+
     // Tracks whether the SAME action+target+reason just failed again, and
     // escalates the message accordingly — the log showed a small model
     // will happily retry an identical failing action a dozen times
@@ -1737,7 +1986,7 @@ public partial class NpcAgent : Node, IWorldCharacter
     // chance-based ones escalate slower and say "that's just luck."
     private void UpdateLastResult(bool success, string actionId, string targetId, string reason)
     {
-        string what = targetId != "" ? $"{actionId} on {targetId}" : actionId;
+        string what = targetId != "" ? $"{actionId} on {DescribeTargetForMemory(targetId)}" : actionId;
 
         if (success)
         {
@@ -1797,9 +2046,12 @@ public partial class NpcAgent : Node, IWorldCharacter
     // OTHER than trade/steal (see OnActionCompleted below) — trade
     // announces itself right where its "given_to" detail already lives,
     // and steal deliberately never goes through here at all (see
-    // AnnounceStealthAttempt instead). wait and speak fall through to
-    // the default on purpose: doing nothing isn't a notable event, and
-    // speech already has its own, audible channel (SpeechLog).
+    // AnnounceStealthAttempt instead). wait, speak, listen, and
+    // attentive_listening all fall through to the default on purpose:
+    // doing nothing outwardly visible isn't a notable event (listen and
+    // attentive_listening are both entirely internal — nothing for
+    // anyone else to actually see happen), and speech already has its
+    // own, audible channel (SpeechLog).
     private void AnnounceVisibleAction(string actionId, string targetId, Godot.Collections.Dictionary data)
     {
         string description = actionId switch
@@ -1836,7 +2088,20 @@ public partial class NpcAgent : Node, IWorldCharacter
         string rollSummary = SkillCheck.SummarizeData(data);
         string color = success ? "8fd694" : "e0876b";
         _uiLog($"[{Personality.Name}] -> {actionId}: {(success ? "OK" : "FAILED")} ({reason}){rollSummary}", color);
-        Memory.Record("action", $"{actionId} {(success ? "succeeded" : $"failed ({reason})")}{rollSummary}");
+        // Target included whenever there is one — this used to be bare
+        // "{actionId} succeeded/failed", full stop, which meant WHAT an
+        // action was actually done to/against never made it into Memory
+        // at all. Harmless for an anonymous resource node (nobody needs
+        // to remember exactly which tree), but a real, observed bug for
+        // attack specifically: an NPC that fought off a wolf had nothing
+        // in Memory saying so beyond "attack succeeded," so the fight
+        // itself didn't survive NpcMemory's later compression and the
+        // NPC genuinely couldn't recall it when asked. See
+        // DescribeTargetForMemory's own header for the animal-species
+        // translation on top of just including the id.
+        string memoryTargetNote = targetId != "" ? $" ({DescribeTargetForMemory(targetId)})" : "";
+        Memory.Record("action", $"{actionId}{memoryTargetNote} {(success ? "succeeded" : $"failed ({reason})")}{rollSummary}");
+        RecordRecentAction(actionId);
         _thoughtLog.Log(Personality.Name, "ACTION_RESULT", $"{actionId} {(success ? "OK" : "FAILED")} ({reason}){rollSummary}");
 
         if (success && actionId == "speak")

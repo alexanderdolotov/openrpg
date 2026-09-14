@@ -3,4 +3,22 @@
     <TargetFramework>net8.0</TargetFramework>
     <EnableDynamicLoading>true</EnableDynamicLoading>
   </PropertyGroup>
+
+  <!--
+    tests/unit/ holds its own separate xUnit project with its own .cs
+    files — the SDK's implicit glob otherwise pulls those straight into
+    THIS project too (duplicate type/AssemblyInfo errors, plus a hard
+    failure on the xunit types this project never references). Excluded
+    here, not by moving tests/unit/ outside the repo, so
+    `dotnet build OpenRPG.csproj` from this directory keeps working
+    exactly as it always has. tests/gameplay/ is deliberately NOT
+    excluded — those .cs files ARE meant to compile into this same
+    project (see tests/README.md): they're real Godot Node scripts,
+    attached to a .tscn and run headless via the Godot binary itself,
+    not a separate assembly the way tests/unit/ is.
+  -->
+  <ItemGroup>
+    <Compile Remove="tests/unit/**/*.cs" />
+    <None Remove="tests/unit/**/*.cs" />
+  </ItemGroup>
 </Project>

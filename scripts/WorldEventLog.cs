@@ -64,6 +64,10 @@ public static class WorldEventLog
     public static List<(string ActorName, string Description)> Witnessed(string observerName, Vector2 observerPosition) =>
         _buffer.Consume(observerName, observerPosition, VisibilityRadius);
 
+    // Non-consuming peek — see RecentEventBuffer.HasPending's own header.
+    public static bool HasPending(string observerName, Vector2 observerPosition) =>
+        _buffer.HasPending(observerName, observerPosition, VisibilityRadius);
+
     // See SpeechLog.Reset()'s own comment — same reasoning, same fix,
     // for the visible-actions side instead of the audible one.
     public static void Reset() => _buffer.Clear();

@@ -1,4 +1,5 @@
 using Godot;
+using System;
 using System.Collections.Generic;
 
 // A shared record of who said what, where, and when — the mechanism
@@ -23,6 +24,12 @@ public static class SpeechLog
     // mechanics.
     public static List<(string SpeakerName, string Message)> Overheard(string listenerName, Vector2 listenerPosition) =>
         _buffer.Consume(listenerName, listenerPosition, HearingRadius);
+
+    // Non-consuming peek — see RecentEventBuffer.HasPending's own header.
+    // actorFilter lets a caller ask "specifically from the player" without
+    // this class needing to know what "the player" means.
+    public static bool HasPending(string listenerName, Vector2 listenerPosition, Func<string, bool> actorFilter = null) =>
+        _buffer.HasPending(listenerName, listenerPosition, HearingRadius, actorFilter);
 
     // Called once at boot (Main._Ready(), alongside WorldEventLog's own
     // and WorldExploration's) — static state like _buffer survives a

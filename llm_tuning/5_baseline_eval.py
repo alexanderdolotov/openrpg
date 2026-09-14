@@ -135,12 +135,29 @@ def all_known_ids_from_tools(tools: list[dict]) -> set[str]:
     return ids
 
 
-def first_enum_for_action(tools: list[dict], action_name: str) -> str:
+def enum_for_action(tools: list[dict], action_name: str) -> list[str] | None:
     for t in tools:
         if t["function"]["name"] == action_name:
-            enum = t["function"]["parameters"]["properties"].get("target_id", {}).get("enum")
-            return enum[0] if enum else ""
-    return ""
+            return t["function"]["parameters"]["properties"].get("target_id", {}).get("enum")
+    return None
+
+
+# 2026-09-13: ported Mind.BuildAction's extension from "default only when
+# target_id is omitted" to "also when it's given but not actually one of
+# the current valid ids" — a live-model stress test caught the real game
+# failing exactly this way (a plausible-looking but wrong tree/fish/etc.
+# id), and this eval needs the same recovery applied to BOTH the
+# structured tool-call path (eval_one) and the lenient-prose path
+# (lenient_parse) or its accuracy numbers understate what the real game
+# now actually accepts. See Mind.BuildAction's own header for the full
+# reasoning.
+def default_target_if_needed(tools: list[dict], name: str, target_id: str | None) -> str | None:
+    if name not in GENERIC_DEFAULT_ACTIONS:
+        return target_id
+    enum = enum_for_action(tools, name)
+    if enum and target_id not in enum:
+        return enum[0]
+    return target_id
 
 
 def lenient_parse(content: str, tools: list[dict]) -> dict | None:
@@ -163,8 +180,7 @@ def lenient_parse(content: str, tools: list[dict]) -> dict | None:
         return None
 
     target_id = find_mentioned_id(content, all_known_ids_from_tools(tools))
-    if target_id == "" and name in GENERIC_DEFAULT_ACTIONS:
-        target_id = first_enum_for_action(tools, name)
+    target_id = default_target_if_needed(tools, name, target_id)
 
     return {"name": name, "arguments": {"target_id": target_id}}
 
@@ -250,6 +266,10 @@ def eval_one(args, example: dict) -> dict:
     elif result["tool_call"] is not None:
         predicted_name = result["tool_call"]["name"]
         predicted_target = result["tool_call"]["arguments"].get("target_id")
+        # Applied against the real name, before the INVALID: prefix below
+        # would break the lookup — see default_target_if_needed's own
+        # header.
+        predicted_target = default_target_if_needed(example["tools"], predicted_name, predicted_target)
         if predicted_name not in VALID_ACTIONS:
             predicted_name = f"INVALID:{predicted_name}"
     else:

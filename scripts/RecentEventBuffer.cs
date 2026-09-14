@@ -1,4 +1,5 @@
 using Godot;
+using System;
 using System.Collections.Generic;
 
 // The shared "who did/said what, where, and who's already caught up on
@@ -91,6 +92,31 @@ internal class RecentEventBuffer
             }
         }
         return result;
+    }
+
+    // A read-only counterpart to Consume() above — checks whether there's
+    // anything this listener could pick up right now WITHOUT marking it
+    // delivered, for a caller that only needs to know "is there something
+    // worth reopening a decision for," not the content itself (see
+    // NpcAgent.ShouldReopenDecision, the one caller as of this writing).
+    // Never consumes anything — an interested caller still goes through
+    // Consume() normally afterward to actually get it, so this can be
+    // called as often and as speculatively as convenient with zero risk
+    // of a listener silently losing something it never actually got a
+    // real turn to see. actorFilter narrows to entries from a specific
+    // kind of speaker (the player, specifically, for one caller) without
+    // needing a whole separate query shape.
+    public bool HasPending(string listenerName, Vector2 listenerPosition, float radius, Func<string, bool> actorFilter = null)
+    {
+        Prune();
+        foreach (Entry e in _recent)
+        {
+            if (e.ActorName == listenerName || e.ConsumedBy.Contains(listenerName)) continue;
+            if (e.RestrictTo != null && !e.RestrictTo.Contains(listenerName)) continue;
+            if (actorFilter != null && !actorFilter(e.ActorName)) continue;
+            if (listenerPosition.DistanceTo(e.Position) <= radius) return true;
+        }
+        return false;
     }
 
     // For SpeechLog.Reset()/WorldEventLog.Reset() — see their own

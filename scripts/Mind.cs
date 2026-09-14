@@ -55,8 +55,35 @@ public class Mind
     // tool that simply isn't in the list. See llm_tuning/common.py's
     // ACT_INSTRUCTION (the version actually benchmarked) — port any
     // future change there too, in the same commit.
+    // 2026-09-13: added the RECENT ACTIONS clause and the "wait is a last
+    // resort" line — up to this point nothing here ever discouraged
+    // repeating a SUCCESSFUL action indefinitely (only a FAILED one, and
+    // only via the separate "last action just failed" clause below), so
+    // an NPC with no strong pull elsewhere would happily pick_apple every
+    // single turn for an entire session, or default to wait the moment
+    // nothing obviously stood out — neither reads as a character actually
+    // living in this world. Deliberately NOT "never repeat" — repeating a
+    // couple of times in a row is normal (finishing a task, a good
+    // gathering streak) and is exactly what NpcAgent.RecordRecentAction/
+    // DescribeRecentActions' own 3-in-a-row streak threshold before
+    // saying anything already reflects; this only asks for the SAME
+    // treatment repeated success already gets for repeated failure two
+    // sentences up — eventually, do something else. See
+    // NpcAgent.BuildPerception's RECENT ACTIONS section, the concrete
+    // thing this actually points at (an unenforceable "don't repeat
+    // yourself" vibe has nothing for a small model to check itself
+    // against otherwise). Port any change here to llm_tuning/common.py's
+    // ACT_INSTRUCTION too, same commit — see that file's own header.
+    // 2026-09-13, later same day: added the CURRENTLY clause once a real
+    // gap turned up while reviewing the new mid-action reopen path
+    // (NpcAgent.ShouldReopenDecision) — a reopened decision had no signal
+    // at all that a long action (a real walk, sleep) was already under
+    // way, so it read as a totally fresh choice with nothing to weigh
+    // against switching. This is the other half of the "don't bounce
+    // around" fix: NPCActor's own no-op-reaffirm guard only helps if the
+    // model actually reaffirms, and it had no reason to without this.
     private const string ActInstruction =
-        "Call exactly one of the tools listed below — whichever one best fits your personality, stats, and the situation above right now. If your last action just failed, don't repeat it — pick something that addresses why. Only target an id that's explicitly listed above; never invent one.";
+        "Call exactly one of the tools listed below — whichever one best fits your personality, stats, and the situation above right now. If your last action just failed, don't repeat it — pick something that addresses why. Check RECENT ACTIONS above too: repeating an action a couple of times in a row is fine, but if it's been the same thing turn after turn, treat it as stale now and go do something else, even if it's still succeeding. wait is a last resort for when nothing else genuinely fits right now, never a routine choice or a default because nothing jumped out — an idle character is wrong here, so look harder before landing on it. If CURRENTLY above shows you're already mid-way through something, you were asked again because something specific happened — weigh it honestly, but finishing what you were already doing is usually still right unless that new thing genuinely changes things; don't abandon a long walk or a good sleep just because you were asked. Only target an id that's explicitly listed above; never invent one.";
     // A completely separate, deliberately narrow instruction from
     // ActInstruction above — "the LLM can't choose to go pick berries
     // while a wolf is attacking them." Only ever used by
@@ -167,7 +194,12 @@ public class Mind
     private const string SummarizeSystemPrompt =
         "You are compressing an NPC's memory log into a short diary paragraph (3-5 sentences) they'll carry forward. Preserve what matters for future decisions — where they've been, what they've done, anything notable, and anything said aloud (by them or heard from someone else), including who said or asked for what by name. A repeated identical failure is NOT routine detail — it's the opposite: state plainly what failed, why, and how many times, so it isn't attempted again pointlessly. Drop only genuinely routine, non-repeated detail (a single successful wait, a normal walk). Write in first person, past tense. Output ONLY the diary paragraph itself — no preamble like \"Here's my attempt to condense this...\", no closing note explaining what you kept or why. The reader is the NPC remembering their own day, not someone reviewing your summarization work.";
 
-    private static readonly string[] ValidActions = { "pick_apple", "catch_fish", "gather_pinecone", "gather_berry", "deposit", "travel", "speak", "follow", "trade", "steal", "attack", "eat", "pick_up_stick", "sleep", "wait", "light_fire", "make_torch", "cook_meat" };
+    // "attentive_listening" is deliberately NOT in this list, unlike
+    // "listen" — it's a mechanical-only reflex (see NpcAgent.
+    // IsAloneAndUneasy/TakeTurn), never offered as a tool and never
+    // something the model itself calls, same as "flee" (the other
+    // mechanical-only action) already isn't listed here either.
+    private static readonly string[] ValidActions = { "pick_apple", "catch_fish", "gather_pinecone", "gather_berry", "deposit", "travel", "speak", "follow", "trade", "steal", "attack", "eat", "pick_up_stick", "sleep", "wait", "light_fire", "make_torch", "cook_meat", "listen" };
 
     // Every item type that currently exists in the world — trade/steal
     // both need a fixed, enumerable answer to "which item" for the tool
@@ -225,6 +257,17 @@ public class Mind
         // carrying the specific raw ingredient (rabbit_meat here,
         // stick there).
         public bool CookMeatAllowed;
+
+        // True only when someone actually just said something to this
+        // NPC this turn (NpcAgent sets this from freshHeard, see
+        // TakeTurn) — "listen" is a real, deliberate choice to take that
+        // in rather than answer immediately, not a generic option that
+        // makes sense with nothing said at all. Forced back to false for
+        // HandleDirectPlayerRequest specifically — a direct question
+        // from the player still needs an actual answer this turn (see
+        // PlayerRequestInstruction), not an easy dodge into "I'm just
+        // listening."
+        public bool ListenAllowed;
     }
 
     public readonly struct MindResult
@@ -909,16 +952,37 @@ public class Mind
         // without this default every recovery attempt for these five
         // actions had no legal target and silently failed every time,
         // even when the phrase matched perfectly.
-        if (targetId == "")
-            targetId = name switch
+        //
+        // 2026-09-13: extended from "only when targetId is omitted" to
+        // "also when it's given but simply isn't one of the currently-
+        // valid ones" — a live-model stress test (see
+        // tests/gameplay/ValidActionStressTest.cs) caught exactly this:
+        // asked to pick apples, the model named a plausible-looking but
+        // wrong id (a stale index, or one that actually belongs to a
+        // different resource category entirely) and the whole action
+        // used to fail outright over it, same as a genuinely
+        // unavailable request. The same reasoning that already justified
+        // defaulting an OMITTED target applies just as well here — this
+        // model's own phrasing was never going to name the exact right
+        // id either way, so silently correcting to the nearest REAL one
+        // for the SAME action is strictly better than discarding the
+        // whole decision and falling back to something unrelated. Still
+        // fails, same as before, when there's genuinely nothing valid to
+        // substitute (the array itself is empty) — see the switch below,
+        // unchanged.
+        if (name is "pick_apple" or "catch_fish" or "gather_pinecone" or "gather_berry" or "pick_up_stick")
+        {
+            string[] validIds = name switch
             {
-                "pick_apple" => targets.TreeIds?.FirstOrDefault() ?? "",
-                "catch_fish" => targets.FishingSpotIds?.FirstOrDefault() ?? "",
-                "gather_pinecone" => targets.PineTreeIds?.FirstOrDefault() ?? "",
-                "gather_berry" => targets.BerryBushIds?.FirstOrDefault() ?? "",
-                "pick_up_stick" => targets.StickIds?.FirstOrDefault() ?? "",
-                _ => targetId,
+                "pick_apple" => targets.TreeIds,
+                "catch_fish" => targets.FishingSpotIds,
+                "gather_pinecone" => targets.PineTreeIds,
+                "gather_berry" => targets.BerryBushIds,
+                _ => targets.StickIds, // pick_up_stick
             };
+            if (Array.IndexOf(validIds, targetId) < 0)
+                targetId = validIds?.FirstOrDefault() ?? "";
+        }
 
         switch (name)
         {
@@ -1017,6 +1081,14 @@ public class Mind
                 if (!targets.CookMeatAllowed)
                     return ParseResult.Fail("cook_meat_not_available");
                 return ParseResult.Success(new GameAction(name, "firepit", ActionRanges.FirePit, emotion));
+            case "listen":
+                // The tool schema already omits "listen" entirely when
+                // !ListenAllowed (see BuildTools), same "schema is a
+                // hint, this is the real trust boundary" posture every
+                // other conditional case here already has.
+                if (!targets.ListenAllowed)
+                    return ParseResult.Fail("listen_not_available");
+                return ParseResult.Success(new GameAction(name, "", 0f, emotion));
             default: // "wait"
                 return ParseResult.Success(new GameAction("wait", "", 0f, emotion));
         }
@@ -1093,7 +1165,16 @@ public class Mind
                 function = new
                 {
                     name = "wait",
-                    description = "Do nothing this turn.",
+                    // "Do nothing this turn." on its own read as an
+                    // equally-weighted menu option next to every real
+                    // activity — see ActInstruction's own header for why
+                    // that's wrong. Discouraging it here, in the
+                    // description actually attached to the tool, follows
+                    // the same lesson ActInstruction's rewrite already
+                    // banked (2026-09-08): a tool's own framing shapes a
+                    // small model's choice more reliably than prose
+                    // arguing against it from outside.
+                    description = "Do nothing this turn. A last resort only, for when nothing else genuinely fits right now — not a routine choice, and not something to reach for just because nothing jumped out.",
                     parameters = new
                     {
                         type = "object",
@@ -1125,6 +1206,32 @@ public class Mind
                 },
             },
         };
+
+        // Only offered when someone actually just said something to this
+        // NPC this turn — see AvailableTargets.ListenAllowed's own
+        // header for why (and for why HandleDirectPlayerRequest forces
+        // it back off regardless).
+        if (targets.ListenAllowed)
+        {
+            tools.Add(new
+            {
+                type = "function",
+                function = new
+                {
+                    name = "listen",
+                    description = "Stay quiet and actually take in what was just said to you, rather than answering right away — a real choice for hearing someone out, thinking it over, or simply not being ready to reply yet.",
+                    parameters = new
+                    {
+                        type = "object",
+                        properties = new
+                        {
+                            emotion = new { type = "string", @enum = EmotionExtensions.AllValues, description = "how you're feeling right now" },
+                        },
+                        required = new[] { "emotion" },
+                    },
+                },
+            });
+        }
 
         // Only offered when NPCActor.CanSleep() says the conditions are
         // actually met right now (see its comment for the three-tier
