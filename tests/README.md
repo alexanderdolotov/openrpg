@@ -20,8 +20,12 @@ them through their real public API (`Mind.Decide`, never the private
 a real backend. Covers: the `listen`/`wait`/gathering tool-gating rules,
 the trust-boundary validation in `BuildAction` (an unavailable or
 out-of-enum action must fail cleanly, never silently succeed; an invalid
-but recoverable target id defaults to the nearest real one), and
-`NpcMemory`'s record/render/compression behavior.
+but recoverable target id defaults to the nearest real one),
+`NpcMemory`'s record/render/compression behavior, and
+`Mind.SanitizeSpokenMessage` (raw JSON leaking through as spoken prose,
+and — the 2026-09-14 "NPCs say 'I don' a lot" finding — a genuinely
+well-formed tool call whose own `message` argument comes back cut off
+mid-word; see that method's own header for the root-cause theory).
 
 Run:
 ```

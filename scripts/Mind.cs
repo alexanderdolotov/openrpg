@@ -582,8 +582,17 @@ public class Mind
 
     public static string SanitizeSpokenMessage(string raw)
     {
-        if (string.IsNullOrWhiteSpace(raw))
-            return raw;
+        // Was "IsNullOrWhiteSpace -> return raw", which handed an empty
+        // spoken line straight to the player as silent, missing dialogue
+        // — the one input StillLooksLikeJson below was already built to
+        // catch (it's true on empty/whitespace) but never got a chance
+        // to, since this early-out skipped past it first. Falling
+        // through instead lets that check do its job: null routes an
+        // empty raw line into CleanUpBrokenSpeech below, which resolves
+        // it to the placeholder immediately, synchronously, no LLM call
+        // spent on nothing.
+        if (raw == null)
+            return null;
 
         string text = raw.Trim();
         Match fieldMatch = JsonMessageFieldRegex.Match(text);
@@ -603,10 +612,10 @@ public class Mind
                 .Replace("\\t", " ")
                 .Replace("\\\\", "\\")
                 .Trim();
-            return StillLooksLikeJson(extracted) ? null : extracted;
+            return StillLooksLikeJson(extracted) || LooksTruncatedMidWord(extracted) ? null : extracted;
         }
 
-        return StillLooksLikeJson(text) ? null : text;
+        return StillLooksLikeJson(text) || LooksTruncatedMidWord(text) ? null : text;
     }
 
     // Deliberately narrow — real spoken dialogue can absolutely contain
@@ -620,6 +629,36 @@ public class Mind
     // toward the former.
     private static bool StillLooksLikeJson(string text) =>
         string.IsNullOrWhiteSpace(text) || JsonCodeLikeRegex.IsMatch(text) || (text.Contains('{') && text.Contains('}'));
+
+    // A DIFFERENT real, observed failure from StillLooksLikeJson above:
+    // a genuinely well-formed structured tool call — a real ToolCalls
+    // entry, name="speak", both arguments present, nothing for
+    // StillLooksLikeJson to catch — whose "message" argument itself
+    // comes back cut off mid-word. Confirmed recurring across many
+    // independent real sessions (see logs/prompt_debug/*.log — "I don"
+    // alone, as the entire message, turns up standalone in at least half
+    // a dozen separate runs from 2026-09-09 through 2026-09-14), always
+    // at the exact same kind of cutoff point: right before an apostrophe
+    // ("I don" instead of "I don't...", "Yeah, I didn" instead of
+    // "...didn't...") or an embedded quotation mark ("Wren said, " with
+    // the actual quoted words missing entirely). Reads like Ollama's own
+    // tool-call text extraction for this model mistaking an apostrophe
+    // or a nested quote inside the string for the string's real closing
+    // quote — nothing wrong with this project's own prompt or parsing
+    // (the JSON handed back is genuinely valid, just short), and nothing
+    // this code can fix upstream of Ollama itself. Caught the same way a
+    // malformed-JSON leak already is: treated as broken speech and
+    // handed to CleanUpBrokenSpeech below rather than spoken verbatim,
+    // half a sentence and all. A real complete reply ending on one of
+    // these words with no more sentence to follow is possible but rare
+    // enough to accept — same "erring toward the wasteful, not the
+    // broken" call as StillLooksLikeJson's own header just above.
+    private static readonly Regex TruncatedContractionRegex =
+        new(@"\b(?:don|didn|doesn|isn|wasn|aren|weren|can|won|wouldn|couldn|shouldn|hasn|haven|hadn|ain)$",
+            RegexOptions.IgnoreCase | RegexOptions.Compiled);
+
+    private static bool LooksTruncatedMidWord(string text) =>
+        TruncatedContractionRegex.IsMatch(text.TrimEnd()) || text.TrimEnd().EndsWith(",");
 
     private const string SpeechCleanupSystemPrompt =
         "You're proofreading one line of dialogue, not roleplaying a character. The line below was supposed to be plain spoken words but got mixed up with code or data formatting (JSON braces, quoted field names like \"message\" or \"emotion\", stray punctuation). Pull out and return ONLY the actual words a person would say out loud, as one plain natural sentence — no braces, no quotes around the whole thing, no field names, no code of any kind. If there's no real spoken content in it at all once the formatting is stripped away, reply with exactly: (didn't catch that)";
